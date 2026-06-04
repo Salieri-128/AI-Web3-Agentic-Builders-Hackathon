@@ -3,20 +3,28 @@ import { ChatPanel, ChatTurn } from "./components/ChatPanel";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { ProposalCard } from "./components/ProposalCard";
 import { StatusPanel } from "./components/StatusPanel";
-import { AuditLog, ChatResponse, fetchProfile, fetchStatus, Profile, Proposal, sendChat, StatusResponse } from "./api";
+import { WalletPanel } from "./components/WalletPanel";
+import {
+  AuditLog,
+  ChatResponse,
+  fetchProfile,
+  fetchStatus,
+  fetchWalletStatus,
+  Profile,
+  Proposal,
+  sendChat,
+  StatusResponse,
+  WalletStatus,
+} from "./api";
 
 function App() {
+  const [activeTab, setActiveTab] = useState<"chat" | "profile">("chat");
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [proposal, setProposal] = useState<Proposal | null>(null);
+  const [wallet, setWallet] = useState<WalletStatus | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [messages, setMessages] = useState<ChatTurn[]>([
-    {
-      role: "agent",
-      content:
-        "I am a policy-controlled treasury agent. Stage 1 supports local memory, CAW read-only audit logs, and proposal-only treasury actions.",
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatTurn[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,6 +36,7 @@ function App() {
     try {
       setStatus(await fetchStatus());
       setProfile(await fetchProfile());
+      setWallet(await fetchWalletStatus());
       setError(null);
     } catch (currentError) {
       setError(currentError instanceof Error ? currentError.message : "Backend status failed");
@@ -37,26 +46,31 @@ function App() {
   async function handleSend(message: string) {
     setIsSending(true);
     setError(null);
-    setMessages((current) => [...current, { role: "user", content: message }]);
+    setMessages([{ role: "user", content: message }]);
     try {
       const response: ChatResponse = await sendChat(message);
-      setMessages((current) => [
-        ...current,
+      setMessages([
+        { role: "user", content: message },
         {
           role: "agent",
           content: response.reply,
+          llmUsed: response.llm_used,
           cawUsed: response.caw_used,
           memoryUpdated: response.memory_updated,
         },
       ]);
       setProposal(response.proposal);
+      setWallet(response.wallet ?? wallet);
       setAuditLogs(response.audit_logs);
       setProfile(response.profile);
       await refreshStatus();
     } catch (currentError) {
       const messageText = currentError instanceof Error ? currentError.message : "Chat request failed";
       setError(messageText);
-      setMessages((current) => [...current, { role: "agent", content: messageText }]);
+      setMessages([
+        { role: "user", content: message },
+        { role: "agent", content: messageText },
+      ]);
     } finally {
       setIsSending(false);
     }
@@ -74,41 +88,56 @@ function App() {
         </button>
       </header>
 
+      <nav className="tab-bar" aria-label="Primary navigation">
+        <button className={activeTab === "chat" ? "active" : ""} onClick={() => setActiveTab("chat")} type="button">
+          Chat
+        </button>
+        <button
+          className={activeTab === "profile" ? "active" : ""}
+          onClick={() => setActiveTab("profile")}
+          type="button"
+        >
+          Profile
+        </button>
+      </nav>
+
       {error && <div className="error-banner">{error}</div>}
 
-      <section className="workspace-grid">
-        <ChatPanel messages={messages} isSending={isSending} onSend={handleSend} />
+      {activeTab === "chat" ? (
+        <section className="chat-tab-layout">
+          <ChatPanel messages={messages} isSending={isSending} onSend={handleSend} />
+          <section className="panel result-panel" aria-label="Proposal and audit result panel">
+            <div className="panel-heading">
+              <span>Current Result</span>
+              <strong>CAW Guarded</strong>
+            </div>
+            {proposal ? <ProposalCard proposal={proposal} /> : <p className="empty-state">No proposal generated yet.</p>}
 
-        <section className="panel result-panel" aria-label="Proposal and audit result panel">
-          <div className="panel-heading">
-            <span>Proposal / Result Panel</span>
-            <strong>Execution Disabled in Stage 1</strong>
-          </div>
-          {proposal ? <ProposalCard proposal={proposal} /> : <p className="empty-state">No proposal generated yet.</p>}
-
-          <div className="audit-section">
-            <h2>Audit Logs</h2>
-            {auditLogs.length > 0 ? (
-              <ul className="audit-list">
-                {auditLogs.map((log, index) => (
-                  <li key={`${log.request_id ?? "log"}-${index}`}>
-                    <span>{log.action ?? "audit_log"}</span>
-                    <small>{log.result ?? log.reason ?? "read-only result"}</small>
-                    {log.created_at && <time>{log.created_at}</time>}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="empty-state">No audit logs loaded.</p>
-            )}
-          </div>
+            <div className="audit-section">
+              <h2>Audit Logs</h2>
+              {auditLogs.length > 0 ? (
+                <ul className="audit-list">
+                  {auditLogs.map((log, index) => (
+                    <li key={`${log.request_id ?? "log"}-${index}`}>
+                      <span>{log.action ?? "audit_log"}</span>
+                      <small>{log.result ?? log.reason ?? "read-only result"}</small>
+                      {log.created_at && <time>{log.created_at}</time>}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="empty-state">No audit logs loaded for the current request.</p>
+              )}
+            </div>
+          </section>
         </section>
-
-        <aside className="side-column">
+      ) : (
+        <section className="profile-tab-layout">
           <StatusPanel status={status} />
+          <WalletPanel wallet={wallet} />
           <MemoryPanel profile={profile} />
-        </aside>
-      </section>
+        </section>
+      )}
     </main>
   );
 }

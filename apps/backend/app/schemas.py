@@ -11,13 +11,41 @@ class StatusResponse(BaseModel):
     backend: str
     agent: str
     caw_configured: bool
+    llm_configured: bool
     memory_loaded: bool
 
 
 class ChatResponse(BaseModel):
     reply: str
+    llm_used: bool
     caw_used: bool
     memory_updated: bool
     proposal: dict[str, Any] | None
+    wallet: dict[str, Any] | None = None
     audit_logs: list[dict[str, Any]]
     profile: dict[str, Any] | None
+
+
+class PactProposalRequest(BaseModel):
+    intent: str
+    chain_id: str = "SETH"
+    token_id: str = "SETH_USDC"
+    destination: str
+    amount: str
+    max_amount_usd: str | None = None
+
+
+class TransferRequest(BaseModel):
+    pact_id: str
+    chain_id: str
+    token_id: str
+    destination: str
+    amount: str
+    request_id: str | None = None
+    execute: bool = False
+
+
+class CawActionResponse(BaseModel):
+    status: str
+    message: str
+    data: dict[str, Any] | list[dict[str, Any]] | None = None
