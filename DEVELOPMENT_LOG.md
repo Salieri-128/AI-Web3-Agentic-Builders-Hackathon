@@ -31,3 +31,9 @@
 - 修改：.gitignore, DEVELOPMENT_LOG.md
 - 意图：避免依赖、密钥、本地文件和 Demo 用户数据误传到远端仓库
 - 备注：保留 data/users/.gitkeep 用于提交目录结构
+
+## 2026-06-04 - 初始化 Stage 1 Agentic Treasury Demo
+
+- 修改：apps/backend, apps/frontend, data/users/profile.json, DEVELOPMENT_LOG.md
+- 意图：打通 Frontend、Backend Agent、Local Memory 和 CAW read-only 查询闭环
+- 备注：资金操作仅生成 proposal，不执行真实交易
