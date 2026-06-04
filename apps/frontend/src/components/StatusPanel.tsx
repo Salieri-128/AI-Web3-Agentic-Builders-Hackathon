@@ -15,6 +15,7 @@ export function StatusPanel({ status }: StatusPanelProps) {
         <Row label="backend" value={status?.backend ?? "loading"} />
         <Row label="agent" value={status?.agent ?? "loading"} />
         <Row label="caw_configured" value={status ? String(status.caw_configured) : "loading"} />
+        <Row label="llm_configured" value={status ? String(status.llm_configured) : "loading"} />
         <Row label="memory_loaded" value={status ? String(status.memory_loaded) : "loading"} />
       </dl>
     </section>

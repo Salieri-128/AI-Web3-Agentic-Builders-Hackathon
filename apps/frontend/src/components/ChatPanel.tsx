@@ -3,6 +3,7 @@ import { FormEvent, useState } from "react";
 export type ChatTurn = {
   role: "user" | "agent";
   content: string;
+  llmUsed?: boolean;
   cawUsed?: boolean;
   memoryUpdated?: boolean;
 };
@@ -14,9 +15,9 @@ type ChatPanelProps = {
 };
 
 const samplePrompts = [
-  "Show my CAW wallet audit logs",
+  "Show my CAW wallet status and balances",
+  "Submit a pact to transfer 1 SETH_USDC to 0x1111111111111111111111111111111111111111 on chain: SETH",
   "记住我偏好保守策略和低 gas",
-  "帮我转 1 USDC 到 savings address",
 ];
 
 export function ChatPanel({ messages, isSending, onSend }: ChatPanelProps) {
@@ -48,16 +49,35 @@ export function ChatPanel({ messages, isSending, onSend }: ChatPanelProps) {
       </div>
 
       <div className="message-list">
-        {messages.map((message, index) => (
-          <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
-            <div className="message-meta">
-              <span>{message.role === "agent" ? "Agent" : "You"}</span>
-              {message.cawUsed && <b>CAW Used</b>}
-              {message.memoryUpdated && <b>Memory Updated</b>}
-            </div>
-            <p>{message.content}</p>
-          </article>
-        ))}
+        {messages.length > 0 ? (
+          <>
+            {messages.map((message, index) => (
+              <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
+                <div className="message-meta">
+                  <span>{message.role === "agent" ? "Agent" : "You"}</span>
+                  {message.llmUsed && <b>LLM Used</b>}
+                  {message.cawUsed && <b>CAW Used</b>}
+                  {message.memoryUpdated && <b>Memory Updated</b>}
+                </div>
+                <p>{message.content}</p>
+              </article>
+            ))}
+            {isSending && (
+              <article className="message agent pending">
+                <div className="message-meta">
+                  <span>Agent</span>
+                  <b>Thinking</b>
+                </div>
+                <p>正在理解你的问题，并调用可用工具查询结果...</p>
+              </article>
+            )}
+          </>
+        ) : (
+          <div className="chat-empty-state">
+            <h2>Ask the treasury agent</h2>
+            <p>Query wallet state, propose a scoped Pact, or update your treasury preferences.</p>
+          </div>
+        )}
       </div>
 
       <div className="sample-row">

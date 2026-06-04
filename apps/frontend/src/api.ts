@@ -2,6 +2,7 @@ export type StatusResponse = {
   backend: string;
   agent: string;
   caw_configured: boolean;
+  llm_configured: boolean;
   memory_loaded: boolean;
 };
 
@@ -25,9 +26,13 @@ export type Proposal = {
   asset: string;
   amount: string;
   destination: string;
+  chain_id?: string;
   status: string;
   execution_enabled: boolean;
   reason: string;
+  pact_spec?: Record<string, unknown>;
+  pact_submission?: Record<string, unknown>;
+  execution_result?: Record<string, unknown>;
 };
 
 export type AuditLog = {
@@ -40,11 +45,20 @@ export type AuditLog = {
 
 export type ChatResponse = {
   reply: string;
+  llm_used: boolean;
   caw_used: boolean;
   memory_updated: boolean;
   proposal: Proposal | null;
+  wallet: WalletStatus | null;
   audit_logs: AuditLog[];
   profile: Profile | null;
+};
+
+export type WalletStatus = {
+  reason?: string;
+  wallet?: Record<string, string | number | boolean | null>;
+  addresses?: Array<Record<string, string | number | boolean | null>>;
+  balances?: Array<Record<string, string | number | boolean | null>>;
 };
 
 const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
@@ -77,4 +91,13 @@ export async function sendChat(message: string): Promise<ChatResponse> {
     throw new Error("Failed to send message to backend agent");
   }
   return response.json();
+}
+
+export async function fetchWalletStatus(): Promise<WalletStatus> {
+  const response = await fetch(`${backendUrl}/api/caw/wallet`);
+  if (!response.ok) {
+    throw new Error("Failed to load CAW wallet status");
+  }
+  const payload = await response.json();
+  return payload.data;
 }

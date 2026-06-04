@@ -44,17 +44,44 @@ input {
   margin: 8px 0 0;
 }
 
-.workspace-grid {
+.tab-bar {
+  display: flex;
+  gap: 8px;
+  margin: 0 auto 18px;
+  max-width: 1360px;
+}
+
+.tab-bar button {
+  background: #ffffff;
+  border: 1px solid #c9d6e5;
+  border-radius: 8px;
+  color: #344155;
+  cursor: pointer;
+  font-weight: 700;
+  min-height: 40px;
+  padding: 8px 16px;
+}
+
+.tab-bar button.active {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #ffffff;
+}
+
+.chat-tab-layout {
   display: grid;
   gap: 18px;
-  grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr) minmax(280px, 0.7fr);
+  grid-template-columns: minmax(380px, 0.95fr) minmax(360px, 1.05fr);
   margin: 0 auto;
   max-width: 1360px;
 }
 
-.side-column {
+.profile-tab-layout {
   display: grid;
   gap: 18px;
+  grid-template-columns: minmax(260px, 0.7fr) minmax(360px, 1.2fr) minmax(280px, 0.8fr);
+  margin: 0 auto;
+  max-width: 1360px;
 }
 
 .panel {
@@ -105,9 +132,31 @@ input {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 440px;
+  min-height: 260px;
+  max-height: 360px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.chat-empty-state {
+  align-content: center;
+  background: #f8fafc;
+  border: 1px dashed #c9d6e5;
+  border-radius: 8px;
+  display: grid;
+  min-height: 240px;
+  padding: 24px;
+}
+
+.chat-empty-state h2 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+
+.chat-empty-state p {
+  color: #5d6d7e;
+  line-height: 1.5;
+  margin: 0;
 }
 
 .message {
@@ -122,6 +171,10 @@ input {
 
 .message.agent {
   background: #fbfcfd;
+}
+
+.message.pending {
+  border-style: dashed;
 }
 
 .message-meta {
@@ -142,6 +195,7 @@ input {
   color: #253142;
   line-height: 1.5;
   margin: 0;
+  white-space: pre-wrap;
 }
 
 .sample-row {
@@ -255,6 +309,23 @@ dd {
   line-height: 1.5;
 }
 
+.json-block {
+  background: #101828;
+  border-radius: 8px;
+  color: #e4e7ec;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.subheading {
+  font-size: 14px;
+  margin: 18px 0 8px;
+}
+
 .audit-section {
   margin-top: 24px;
 }
@@ -298,12 +369,8 @@ dd {
 }
 
 @media (max-width: 1100px) {
-  .workspace-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .side-column {
-    grid-column: 1 / -1;
+  .chat-tab-layout,
+  .profile-tab-layout {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -314,8 +381,8 @@ dd {
   }
 
   .app-header,
-  .workspace-grid,
-  .side-column,
+  .chat-tab-layout,
+  .profile-tab-layout,
   .chat-form {
     grid-template-columns: 1fr;
   }
