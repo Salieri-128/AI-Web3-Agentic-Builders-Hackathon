@@ -43,6 +43,10 @@ Thumbs.db
 .yarn/build-state.yml
 .yarn/install-state.gz
 
+# Python caches
+__pycache__/
+*.py[cod]
+
 # Demo-local user data
 data/users/*
 !data/users/.gitkeep
