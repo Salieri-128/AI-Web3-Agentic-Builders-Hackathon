@@ -67,3 +67,9 @@
 - 修改：apps/backend/app/services/llm_service.py, apps/backend/app/services/agent_service.py, apps/backend/app/services/caw_service.py, apps/frontend/src/components/ChatPanel.tsx, apps/frontend/src/styles.css, DEVELOPMENT_LOG.md
 - 意图：让 Chat 在工具查询后由 LLM 生成最终回答，并修正 CAW 余额字段
 - 备注：SETH 余额读取 amount/total 字段
+
+## 2026-06-07 - 调整分支合并规则
+
+- 修改：AGENTS.md, DEVELOPMENT_LOG.md
+- 意图：允许用户明确要求时由 AI / Codex 执行 merge
+- 备注：默认仍不自动合并
