@@ -45,6 +45,30 @@ class TransferRequest(BaseModel):
     execute: bool = False
 
 
+class TreasuryInitializeRequest(BaseModel):
+    deposit_amount: str = "1000"
+
+
+class TreasuryTransferRequest(BaseModel):
+    destination: str
+    amount: str
+    pact_id: str | None = None
+    execute: bool = False
+
+
+class PactApprovalRequest(BaseModel):
+    pact_id: str
+
+
+class AavePactRequest(BaseModel):
+    max_amount: str = "100"
+
+
+class AaveActionRequest(BaseModel):
+    pact_id: str
+    amount: str
+
+
 class CawActionResponse(BaseModel):
     status: str
     message: str
