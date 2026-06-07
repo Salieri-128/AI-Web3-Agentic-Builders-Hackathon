@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -92,6 +91,23 @@ async def submit_transfer_pact(
         return _service_error(error)
 
 
+async def submit_contract_call_pact(*, intent: str, spec: dict[str, Any], name: str | None = None) -> dict[str, Any]:
+    if not is_caw_configured():
+        return {"reason": CAW_NOT_CONFIGURED_MESSAGE}
+
+    try:
+        async with _wallet_client() as client:
+            result = await client.submit_pact(
+                wallet_id=_required_caw_wallet_id(),
+                intent=intent,
+                spec=spec,
+                name=name,
+            )
+            return _as_dict(result)
+    except Exception as error:
+        return _service_error(error)
+
+
 async def get_pact(pact_id: str) -> dict[str, Any]:
     if not is_caw_configured():
         return {"reason": CAW_NOT_CONFIGURED_MESSAGE}
@@ -100,6 +116,59 @@ async def get_pact(pact_id: str) -> dict[str, Any]:
         async with _wallet_client() as client:
             pact = await client.get_pact(pact_id)
             return _redact_sensitive(_as_dict(pact))
+    except Exception as error:
+        return _service_error(error)
+
+
+async def eth_call(*, chain_id: str, to: str, data: str, from_address: str | None = None) -> dict[str, Any]:
+    if not is_caw_configured():
+        return {"reason": CAW_NOT_CONFIGURED_MESSAGE}
+
+    try:
+        async with _wallet_client() as client:
+            result = await client.eth_call(chain_id=chain_id, to=to, data=data, var_from=from_address)
+            return _redact_sensitive(_as_dict(result) if not isinstance(result, str) else {"result": result})
+    except Exception as error:
+        return _service_error(error)
+
+
+async def contract_call_with_pact(
+    *,
+    pact_id: str,
+    chain_id: str,
+    contract_addr: str,
+    calldata: str,
+    value: str = "0",
+    request_id: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    if not is_caw_configured():
+        return {"reason": CAW_NOT_CONFIGURED_MESSAGE}
+
+    try:
+        async with _wallet_client() as owner_client:
+            pact = await owner_client.get_pact(pact_id)
+            pact_dict = _as_dict(pact)
+            if pact_dict.get("status") != "active":
+                return {
+                    "status": "pact_not_active",
+                    "reason": f"Pact status is {pact_dict.get('status', 'unknown')}. Wait for owner approval.",
+                }
+            pact_api_key = pact_dict.get("api_key")
+            if not pact_api_key:
+                return {"status": "missing_pact_api_key", "reason": "CAW did not return a pact-scoped API key."}
+
+        async with _wallet_client(api_key=pact_api_key) as pact_client:
+            result = await pact_client.contract_call(
+                _required_caw_wallet_id(),
+                chain_id=chain_id,
+                contract_addr=contract_addr,
+                value=value,
+                calldata=calldata,
+                request_id=request_id or f"agentic-treasury-{uuid.uuid4()}",
+                description=description,
+            )
+            return _redact_sensitive(_as_dict(result))
     except Exception as error:
         return _service_error(error)
 
@@ -116,27 +185,6 @@ async def transfer_tokens_with_pact(
 ) -> dict[str, Any]:
     if not is_caw_configured():
         return {"reason": CAW_NOT_CONFIGURED_MESSAGE}
-
-    if not execute:
-        return {
-            "status": "proposal_only",
-            "execution_enabled": False,
-            "reason": "Set execute=true only after the user explicitly approves execution.",
-            "request": {
-                "pact_id": pact_id,
-                "chain_id": chain_id,
-                "token_id": token_id,
-                "destination": destination,
-                "amount": amount,
-            },
-        }
-
-    if os.getenv("CAW_ENABLE_REAL_EXECUTION", "").lower() != "true":
-        return {
-            "status": "blocked_by_backend_guard",
-            "execution_enabled": False,
-            "reason": "Real CAW transfers require CAW_ENABLE_REAL_EXECUTION=true in backend .env.",
-        }
 
     try:
         async with _wallet_client() as owner_client:

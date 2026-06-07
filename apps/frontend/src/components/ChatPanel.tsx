@@ -14,12 +14,6 @@ type ChatPanelProps = {
   onSend: (message: string) => Promise<void>;
 };
 
-const samplePrompts = [
-  "Show my CAW wallet status and balances",
-  "Submit a pact to transfer 1 SETH_USDC to 0x1111111111111111111111111111111111111111 on chain: SETH",
-  "记住我偏好保守策略和低 gas",
-];
-
 export function ChatPanel({ messages, isSending, onSend }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
 
@@ -33,21 +27,8 @@ export function ChatPanel({ messages, isSending, onSend }: ChatPanelProps) {
     await onSend(message);
   }
 
-  async function sendPrompt(prompt: string) {
-    if (isSending) {
-      return;
-    }
-    setDraft("");
-    await onSend(prompt);
-  }
-
   return (
-    <section className="panel chat-panel" aria-label="Chat panel">
-      <div className="panel-heading">
-        <span>Chat Panel</span>
-        <strong>Agent</strong>
-      </div>
-
+    <section className="chat-panel-wide" aria-label="Chat panel">
       <div className="message-list">
         {messages.length > 0 ? (
           <>
@@ -73,25 +54,14 @@ export function ChatPanel({ messages, isSending, onSend }: ChatPanelProps) {
             )}
           </>
         ) : (
-          <div className="chat-empty-state">
-            <h2>Ask the treasury agent</h2>
-            <p>Query wallet state, propose a scoped Pact, or update your treasury preferences.</p>
-          </div>
+          <div className="chat-empty-state" />
         )}
-      </div>
-
-      <div className="sample-row">
-        {samplePrompts.map((prompt) => (
-          <button className="prompt-button" key={prompt} onClick={() => sendPrompt(prompt)} type="button">
-            {prompt}
-          </button>
-        ))}
       </div>
 
       <form className="chat-form" onSubmit={submit}>
         <input
           aria-label="Message"
-          placeholder="Ask about CAW logs, memory preferences, or a proposal..."
+          placeholder="Ask the treasury agent..."
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
         />

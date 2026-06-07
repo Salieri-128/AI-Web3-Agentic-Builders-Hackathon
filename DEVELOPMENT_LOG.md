@@ -67,3 +67,21 @@
 - 修改：apps/backend/app/services/llm_service.py, apps/backend/app/services/agent_service.py, apps/backend/app/services/caw_service.py, apps/frontend/src/components/ChatPanel.tsx, apps/frontend/src/styles.css, DEVELOPMENT_LOG.md
 - 意图：让 Chat 在工具查询后由 LLM 生成最终回答，并修正 CAW 余额字段
 - 备注：SETH 余额读取 amount/total 字段
+
+## 2026-06-07 - 实现 Sepolia 策略钱包
+
+- 修改：apps/backend/app/services/treasury_service.py, apps/backend/app/main.py, apps/backend/app/schemas.py, apps/backend/app/services/agent_service.py, apps/frontend/src, DEVELOPMENT_LOG.md
+- 意图：实现 CAW Sepolia 钱包状态、每日再平衡建议、内部调仓 Pact、外部转账 Pact 和转账统计
+- 备注：外部转账可在 CAW Pact active 后真实执行，后端不再额外设置执行保护开关
+
+## 2026-06-07 - 接入 Aave Sepolia USDC
+
+- 修改：apps/backend/app/services/aave_service.py, apps/backend/app/services/caw_service.py, apps/backend/app/services/treasury_service.py, apps/backend/app/main.py, apps/frontend/src, DEVELOPMENT_LOG.md
+- 意图：打通 Aave Sepolia USDC faucet、approve、supply、withdraw 的 CAW contract_call 链路
+- 备注：已提交 Aave contract-call Pact，等待 CAW owner 审批
+
+## 2026-06-07 - 重构前端标签页
+
+- 修改：apps/frontend/src, apps/backend/app/main.py, DEVELOPMENT_LOG.md
+- 意图：改为 Chat、Portfolio、Strategy、History 四个标签页，并展示链上资产组合
+- 备注：Portfolio 使用现有 CAW/Aave 状态组装

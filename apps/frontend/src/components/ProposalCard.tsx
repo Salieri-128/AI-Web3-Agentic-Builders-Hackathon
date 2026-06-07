@@ -5,44 +5,57 @@ type ProposalCardProps = {
 };
 
 export function ProposalCard({ proposal }: ProposalCardProps) {
+  const title = proposal.type ?? proposal.pact_type ?? "pact";
+  const asset = proposal.asset ?? String(proposal.scope?.asset ?? "n/a");
+  const amount = proposal.amount ?? String(proposal.scope?.max_single_amount ?? proposal.scope?.max_amount ?? "n/a");
+  const destination = proposal.destination ?? String(proposal.scope?.destination_address ?? "internal only");
+  const chainId = proposal.chain_id ?? String(proposal.scope?.chain_id ?? "");
+
   return (
     <article className="proposal-card">
       <div className="proposal-topline">
-        <h2>{proposal.type}</h2>
+        <h2>{title}</h2>
         <span>{proposal.status}</span>
       </div>
       <dl>
+        {proposal.pact_id && (
+          <div>
+            <dt>pact_id</dt>
+            <dd>{proposal.pact_id}</dd>
+          </div>
+        )}
         <div>
           <dt>asset</dt>
-          <dd>{proposal.asset}</dd>
+          <dd>{asset}</dd>
         </div>
         <div>
           <dt>amount</dt>
-          <dd>{proposal.amount}</dd>
+          <dd>{amount}</dd>
         </div>
         <div>
           <dt>destination</dt>
-          <dd>{proposal.destination}</dd>
+          <dd>{destination}</dd>
         </div>
-        {proposal.chain_id && (
+        {chainId && (
           <div>
             <dt>chain_id</dt>
-            <dd>{proposal.chain_id}</dd>
+            <dd>{chainId}</dd>
           </div>
         )}
         <div>
           <dt>execution_enabled</dt>
-          <dd>{String(proposal.execution_enabled)}</dd>
+          <dd>{String(Boolean(proposal.execution_enabled))}</dd>
         </div>
       </dl>
       <p>{proposal.reason}</p>
+      {proposal.scope && <pre className="json-block">{JSON.stringify(proposal.scope, null, 2)}</pre>}
       {proposal.pact_submission && (
         <pre className="json-block">{JSON.stringify(proposal.pact_submission, null, 2)}</pre>
       )}
       {proposal.execution_result && (
         <pre className="json-block">{JSON.stringify(proposal.execution_result, null, 2)}</pre>
       )}
-      <strong className="disabled-badge">Execution Disabled in Stage 1</strong>
+      <strong className="disabled-badge">Requires Pact Approval</strong>
     </article>
   );
 }

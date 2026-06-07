@@ -6,11 +6,37 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.schemas import CawActionResponse, ChatRequest, ChatResponse, PactProposalRequest, StatusResponse, TransferRequest
+from app.schemas import (
+    AaveActionRequest,
+    AavePactRequest,
+    CawActionResponse,
+    ChatRequest,
+    ChatResponse,
+    PactApprovalRequest,
+    PactProposalRequest,
+    StatusResponse,
+    TransferRequest,
+    TreasuryInitializeRequest,
+    TreasuryTransferRequest,
+)
+from app.services.aave_service import (
+    execute_aave_faucet_claim,
+    execute_aave_supply,
+    execute_aave_withdraw,
+    get_aave_wallet_state,
+    submit_aave_rebalance_pact,
+)
 from app.services.agent_service import handle_user_message
 from app.services.caw_service import get_audit_logs, get_wallet_status, is_caw_configured, submit_transfer_pact, transfer_tokens_with_pact
 from app.services.llm_service import is_llm_configured
 from app.services.memory_service import is_memory_loaded, load_profile
+from app.services.treasury_service import (
+    approve_local_pact,
+    get_treasury_state,
+    initialize_wallet,
+    run_daily_rebalance,
+    send_asset,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -21,7 +47,12 @@ app = FastAPI(title="Agentic Treasury Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,3 +123,67 @@ async def caw_transfer(request: TransferRequest) -> CawActionResponse:
         execute=request.execute,
     )
     return CawActionResponse(status=str(result.get("status", "ok")), message="Transfer route completed", data=result)
+
+
+@app.get("/api/treasury", response_model=CawActionResponse)
+async def treasury_state() -> CawActionResponse:
+    return CawActionResponse(status="ok", message="Treasury state loaded", data=await get_treasury_state())
+
+
+@app.post("/api/treasury/initialize", response_model=CawActionResponse)
+async def treasury_initialize(request: TreasuryInitializeRequest) -> CawActionResponse:
+    result = await initialize_wallet(request.deposit_amount)
+    return CawActionResponse(status="initialized", message="Demo wallet initialized", data=result)
+
+
+@app.post("/api/treasury/rebalance", response_model=CawActionResponse)
+async def treasury_rebalance() -> CawActionResponse:
+    result = await run_daily_rebalance()
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Daily rebalance completed", data=result)
+
+
+@app.post("/api/treasury/transfers", response_model=CawActionResponse)
+async def treasury_transfer(request: TreasuryTransferRequest) -> CawActionResponse:
+    result = await send_asset(
+        destination=request.destination,
+        amount=request.amount,
+        pact_id=request.pact_id,
+        execute=request.execute,
+    )
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Transfer flow completed", data=result)
+
+
+@app.post("/api/treasury/pacts/approve", response_model=CawActionResponse)
+async def treasury_approve_pact(request: PactApprovalRequest) -> CawActionResponse:
+    result = await approve_local_pact(request.pact_id)
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Local pact approval completed", data=result)
+
+
+@app.get("/api/aave", response_model=CawActionResponse)
+async def aave_state() -> CawActionResponse:
+    result = await get_aave_wallet_state()
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Aave Sepolia state loaded", data=result)
+
+
+@app.post("/api/aave/pacts", response_model=CawActionResponse)
+async def aave_submit_pact(request: AavePactRequest) -> CawActionResponse:
+    result = await submit_aave_rebalance_pact(max_amount=request.max_amount)
+    return CawActionResponse(status=str(result.get("status", "submitted")), message="Aave contract-call pact submitted", data=result)
+
+
+@app.post("/api/aave/faucet", response_model=CawActionResponse)
+async def aave_faucet(request: AaveActionRequest) -> CawActionResponse:
+    result = await execute_aave_faucet_claim(pact_id=request.pact_id, amount=request.amount)
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Aave faucet claim completed", data=result)
+
+
+@app.post("/api/aave/supply", response_model=CawActionResponse)
+async def aave_supply(request: AaveActionRequest) -> CawActionResponse:
+    result = await execute_aave_supply(pact_id=request.pact_id, amount=request.amount)
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Aave supply completed", data=result)
+
+
+@app.post("/api/aave/withdraw", response_model=CawActionResponse)
+async def aave_withdraw(request: AaveActionRequest) -> CawActionResponse:
+    result = await execute_aave_withdraw(pact_id=request.pact_id, amount=request.amount)
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Aave withdraw completed", data=result)
