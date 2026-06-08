@@ -16,7 +16,7 @@ Return only compact JSON with this shape:
   "action": "wallet_status|audit_logs|submit_pact|transfer_proposal|execute_transfer|memory_update|none",
   "parameters": {
     "chain_id": "SETH",
-    "token_id": "SETH_USDC",
+    "token_id": "SETH_WBTC",
     "amount": "1",
     "destination": "0x...",
     "max_amount_usd": "101",
@@ -31,8 +31,8 @@ Use the provided tool results as ground truth. Do not invent balances, addresses
 If wallet balances are present, state the exact token amount, token, and chain.
 For direct balance questions such as "钱包有多少钱", answer simply and directly:
 - list native Sepolia ETH/SETH balance
-- list Sepolia USDC wallet balance
-- list Aave Sepolia aUSDC/yield balance
+- list Sepolia WBTC wallet balance
+- list Aave Sepolia aWBTC/yield balance
 - include the wallet address if available
 Do not say a token is missing just because one tool omitted it; use the merged treasury/aave results when present.
 If a Pact or transaction requires approval, say so clearly.

@@ -91,3 +91,45 @@
 - 修改：apps/frontend/src, apps/backend/app/main.py, DEVELOPMENT_LOG.md
 - 意图：改为 Chat、Portfolio、Strategy、History 四个标签页，并展示链上资产组合
 - 备注：Portfolio 使用现有 CAW/Aave 状态组装
+
+## 2026-06-08 - 简化 Strategy 策略页
+
+- 修改：apps/frontend/src/components/TreasuryPanel.tsx, apps/frontend/src/App.tsx, apps/frontend/src/styles.css
+- 意图：让 Aave USDC 策略页面向普通用户展示策略说明、一键执行和资金流动性状态
+- 备注：保留 CAW Pact 审批边界，前端只提交/刷新授权状态
+
+## 2026-06-08 - 串联 Strategy Pact 审批流
+
+- 修改：apps/backend/app/main.py, apps/backend/app/services/treasury_service.py, apps/frontend/src
+- 意图：执行策略时先提交 CAW Rebalance Pact，等待用户审批后再执行 Aave 调仓
+- 备注：前端审批弹窗会轮询 Pact 状态，策略成功后再展示资金结果
+
+## 2026-06-08 - 修正 Strategy 假完成状态
+
+- 修改：apps/backend/app/services/treasury_service.py, apps/frontend/src
+- 意图：避免旧本地 Pact 被误判为真实 CAW 授权，并阻止 Aave 执行失败时显示完成
+- 备注：只有带 caw_pact_id 的 active Pact 才可执行
+
+## 2026-06-08 - 移除 Aave Faucet 路径
+
+- 修改：apps/backend/app/services/aave_service.py, apps/backend/app/main.py, apps/backend/app/services/agent_service.py, apps/frontend/src/api.ts, data/users/demo
+- 意图：Aave 策略 Pact 只允许 approve、supply、withdraw，不再包含 faucet 或本地领水流程
+- 备注：清理旧本地 internal pact 和旧 faucet pact 记录
+
+## 2026-06-08 - 验证 Aave Supply 执行
+
+- 修改：apps/backend/app/services/caw_service.py, apps/backend/app/services/aave_service.py, DEVELOPMENT_LOG.md
+- 意图：补齐 CAW contract_call 的 src_addr，并验证 100 USDC Aave supply 链路
+- 备注：approve 成功，supply 因 Aave error 51 供应上限失败
+
+## 2026-06-08 - 切换策略资产到 WBTC
+
+- 修改：apps/backend/app/services/aave_service.py, apps/backend/app/services/treasury_service.py, apps/backend/app/services/agent_service.py, apps/frontend/src, data/users/demo
+- 意图：将 Aave 生息策略主体从 USDC 改为 WBTC，并展示 WBTC/aWBTC 资产
+- 备注：当前钱包检测到 1 WBTC，推荐保留 0.1 WBTC、投入 0.9 WBTC
+
+## 2026-06-08 - 串联 Approve 后自动 Supply
+
+- 修改：apps/backend/app/services/aave_service.py, DEVELOPMENT_LOG.md
+- 意图：approve 提交后等待 allowance 生效，再自动执行 Aave supply
+- 备注：已完成 0.9 WBTC supply，当前钱包 0.1 WBTC、Aave 0.9 aWBTC

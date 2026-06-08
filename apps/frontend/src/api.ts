@@ -103,6 +103,8 @@ export type TreasuryState = {
   pacts: LocalPact[];
   aave?: {
     status?: string;
+    asset?: string;
+    a_token_asset?: string;
     wallet_address?: string;
     wallet_balance?: string;
     aave_balance?: string;
@@ -211,10 +213,6 @@ export async function submitAavePact(maxAmount = "100"): Promise<Record<string, 
   return payload.data;
 }
 
-export async function claimAaveFaucet(pactId: string, amount = "100"): Promise<Record<string, unknown>> {
-  return runAaveAction("faucet", pactId, amount);
-}
-
 export async function supplyAave(pactId: string, amount = "10"): Promise<Record<string, unknown>> {
   return runAaveAction("supply", pactId, amount);
 }
@@ -223,7 +221,7 @@ export async function withdrawAave(pactId: string, amount = "10"): Promise<Recor
   return runAaveAction("withdraw", pactId, amount);
 }
 
-async function runAaveAction(action: "faucet" | "supply" | "withdraw", pactId: string, amount: string) {
+async function runAaveAction(action: "supply" | "withdraw", pactId: string, amount: string) {
   const response = await fetch(`${backendUrl}/api/aave/${action}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

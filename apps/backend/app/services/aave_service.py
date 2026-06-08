@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
@@ -16,17 +17,17 @@ from app.services.caw_service import (
 CHAIN_ID = "SETH"
 AAVE_POOL = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951"
 AAVE_DATA_PROVIDER = "0x3e9708d80f7B3e43118013075F7e95CE3AB31F31"
-AAVE_FAUCET = "0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D"
-USDC = "0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8"
-AUSDC = "0x16dA4541aD1807f4443d92D26044C1147406EB80"
-USDC_DECIMALS = 6
+ASSET_SYMBOL = "WBTC"
+ATOKEN_SYMBOL = "aWBTC"
+WBTC = "0x29f2d40b0605204364af54ec677bd022da425d03"
+AWBTC = "0x1804bf30507dc2eb3bdebbbdd859991eaef6eeff"
+ASSET_DECIMALS = 8
 
 SELECTOR_APPROVE = "0x095ea7b3"
 SELECTOR_SUPPLY = "0x617ba037"
 SELECTOR_WITHDRAW = "0x69328dec"
 SELECTOR_BALANCE_OF = "0x70a08231"
 SELECTOR_ALLOWANCE = "0xdd62ed3e"
-SELECTOR_FAUCET_MINT = "0xc6c3bbe6"
 
 
 def aave_config() -> dict[str, Any]:
@@ -35,12 +36,11 @@ def aave_config() -> dict[str, Any]:
         "protocol": "Aave V3 Sepolia",
         "pool": AAVE_POOL,
         "data_provider": AAVE_DATA_PROVIDER,
-        "faucet": AAVE_FAUCET,
         "asset": {
-            "symbol": "USDC",
-            "underlying": USDC,
-            "a_token": AUSDC,
-            "decimals": USDC_DECIMALS,
+            "symbol": ASSET_SYMBOL,
+            "underlying": WBTC,
+            "a_token": AWBTC,
+            "decimals": ASSET_DECIMALS,
         },
     }
 
@@ -49,19 +49,20 @@ async def get_aave_wallet_state() -> dict[str, Any]:
     wallet_address = await get_caw_evm_address()
     if not wallet_address:
         return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
-    usdc_units = await _read_erc20_balance(USDC, wallet_address)
-    ausdc_units = await _read_erc20_balance(AUSDC, wallet_address)
-    allowance_units = await _read_erc20_allowance(USDC, wallet_address, AAVE_POOL)
+    wallet_units = await _read_erc20_balance(WBTC, wallet_address)
+    aave_units = await _read_erc20_balance(AWBTC, wallet_address)
+    allowance_units = await _read_erc20_allowance(WBTC, wallet_address, AAVE_POOL)
     return {
         "status": "ok",
         "wallet_address": wallet_address,
-        "asset": "USDC",
-        "wallet_balance": _format_units(usdc_units, USDC_DECIMALS),
-        "aave_balance": _format_units(ausdc_units, USDC_DECIMALS),
-        "pool_allowance": _format_units(allowance_units, USDC_DECIMALS),
+        "asset": ASSET_SYMBOL,
+        "a_token_asset": ATOKEN_SYMBOL,
+        "wallet_balance": _format_units(wallet_units, ASSET_DECIMALS),
+        "aave_balance": _format_units(aave_units, ASSET_DECIMALS),
+        "pool_allowance": _format_units(allowance_units, ASSET_DECIMALS),
         "raw": {
-            "wallet_balance_units": str(usdc_units),
-            "aave_balance_units": str(ausdc_units),
+            "wallet_balance_units": str(wallet_units),
+            "aave_balance_units": str(aave_units),
             "pool_allowance_units": str(allowance_units),
         },
         "config": aave_config(),
@@ -73,14 +74,14 @@ async def submit_aave_rebalance_pact(max_amount: str = "100") -> dict[str, Any]:
     if not wallet_address:
         return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
 
-    max_units = _parse_units(max_amount, USDC_DECIMALS)
+    max_units = _parse_units(max_amount, ASSET_DECIMALS)
     spec = build_aave_rebalance_pact_spec(wallet_address=wallet_address, max_amount_units=max_units)
     return await submit_contract_call_pact(
         intent=(
-            f"Allow this agent to rebalance Sepolia USDC with Aave V3 up to {max_amount} USDC "
-            "using approve, supply, withdraw, and official Aave faucet mint calls only."
+            f"Allow this agent to rebalance Sepolia {ASSET_SYMBOL} with Aave V3 up to {max_amount} {ASSET_SYMBOL} "
+            "using approve, supply, and withdraw calls only."
         ),
-        name="aave-sepolia-usdc-rebalance",
+        name="aave-sepolia-wbtc-rebalance",
         spec=spec,
     )
 
@@ -89,33 +90,52 @@ async def execute_aave_supply(pact_id: str, amount: str) -> dict[str, Any]:
     wallet_address = await get_caw_evm_address()
     if not wallet_address:
         return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
-    amount_units = _parse_units(amount, USDC_DECIMALS)
+    amount_units = _parse_units(amount, ASSET_DECIMALS)
     approve_calldata = encode_approve(AAVE_POOL, amount_units)
-    supply_calldata = encode_supply(USDC, amount_units, wallet_address)
-    approve_result = await contract_call_with_pact(
-        pact_id=pact_id,
-        chain_id=CHAIN_ID,
-        contract_addr=USDC,
-        calldata=approve_calldata,
-        description=f"Approve Aave Pool to pull {amount} USDC",
-    )
-    if approve_result.get("status") == "pact_not_active" or approve_result.get("status") == "error":
-        return {"status": "approve_failed", "approve": approve_result}
+    supply_calldata = encode_supply(WBTC, amount_units, wallet_address)
+    starting_aave_units = await _read_erc20_balance(AWBTC, wallet_address)
+    allowance_units = await _read_erc20_allowance(WBTC, wallet_address, AAVE_POOL)
+    approve_result: dict[str, Any] = {"status": "skipped", "reason": "Existing Aave Pool allowance is sufficient."}
+    if allowance_units < amount_units:
+        approve_result = await contract_call_with_pact(
+            pact_id=pact_id,
+            chain_id=CHAIN_ID,
+            contract_addr=WBTC,
+            src_addr=wallet_address,
+            calldata=approve_calldata,
+            description=f"Approve Aave Pool to pull {amount} {ASSET_SYMBOL}",
+        )
+        if approve_result.get("status") == "pact_not_active" or approve_result.get("status") == "error":
+            return {"status": "approve_failed", "approve": approve_result}
+        allowance_units = await _wait_for_allowance(wallet_address, amount_units)
+        if allowance_units < amount_units:
+            return {
+                "status": "approval_pending",
+                "operation": "aave_supply",
+                "amount": amount,
+                "calldata": {"approve": approve_calldata, "supply": supply_calldata},
+                "approve": approve_result,
+                "aave": await get_aave_wallet_state(),
+                "reason": "Approval was submitted, but allowance has not updated yet.",
+            }
     supply_result = await contract_call_with_pact(
         pact_id=pact_id,
         chain_id=CHAIN_ID,
         contract_addr=AAVE_POOL,
+        src_addr=wallet_address,
         calldata=supply_calldata,
-        description=f"Supply {amount} USDC to Aave V3 Sepolia",
+        description=f"Supply {amount} {ASSET_SYMBOL} to Aave V3 Sepolia",
     )
+    final_aave_units = await _wait_for_aave_balance(wallet_address, starting_aave_units + amount_units)
+    final_state = await get_aave_wallet_state()
     return {
-        "status": str(supply_result.get("status", "submitted")),
+        "status": "ok" if final_aave_units >= starting_aave_units + amount_units else str(supply_result.get("status", "submitted")),
         "operation": "aave_supply",
         "amount": amount,
         "calldata": {"approve": approve_calldata, "supply": supply_calldata},
         "approve": approve_result,
         "supply": supply_result,
-        "aave": await get_aave_wallet_state(),
+        "aave": final_state,
     }
 
 
@@ -123,14 +143,15 @@ async def execute_aave_withdraw(pact_id: str, amount: str) -> dict[str, Any]:
     wallet_address = await get_caw_evm_address()
     if not wallet_address:
         return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
-    amount_units = _parse_units(amount, USDC_DECIMALS)
-    withdraw_calldata = encode_withdraw(USDC, amount_units, wallet_address)
+    amount_units = _parse_units(amount, ASSET_DECIMALS)
+    withdraw_calldata = encode_withdraw(WBTC, amount_units, wallet_address)
     withdraw_result = await contract_call_with_pact(
         pact_id=pact_id,
         chain_id=CHAIN_ID,
         contract_addr=AAVE_POOL,
+        src_addr=wallet_address,
         calldata=withdraw_calldata,
-        description=f"Withdraw {amount} USDC from Aave V3 Sepolia",
+        description=f"Withdraw {amount} {ASSET_SYMBOL} from Aave V3 Sepolia",
     )
     return {
         "status": str(withdraw_result.get("status", "submitted")),
@@ -138,29 +159,6 @@ async def execute_aave_withdraw(pact_id: str, amount: str) -> dict[str, Any]:
         "amount": amount,
         "calldata": {"withdraw": withdraw_calldata},
         "withdraw": withdraw_result,
-        "aave": await get_aave_wallet_state(),
-    }
-
-
-async def execute_aave_faucet_claim(pact_id: str, amount: str = "100") -> dict[str, Any]:
-    wallet_address = await get_caw_evm_address()
-    if not wallet_address:
-        return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
-    amount_units = _parse_units(amount, USDC_DECIMALS)
-    calldata = encode_faucet_mint(USDC, wallet_address, amount_units)
-    result = await contract_call_with_pact(
-        pact_id=pact_id,
-        chain_id=CHAIN_ID,
-        contract_addr=AAVE_FAUCET,
-        calldata=calldata,
-        description=f"Claim {amount} test USDC from official Aave Sepolia faucet",
-    )
-    return {
-        "status": str(result.get("status", "submitted")),
-        "operation": "aave_faucet_claim",
-        "amount": amount,
-        "calldata": calldata,
-        "claim": result,
         "aave": await get_aave_wallet_state(),
     }
 
@@ -202,29 +200,17 @@ def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int
             ],
         }
     ]
-    faucet_abi = [
-        {
-            "type": "function",
-            "name": "mint",
-            "selector": SELECTOR_FAUCET_MINT,
-            "inputs": [
-                {"name": "token", "type": "address"},
-                {"name": "to", "type": "address"},
-                {"name": "amount", "type": "uint256"},
-            ],
-        }
-    ]
     return {
         "policies": [
             {
-                "name": "aave-usdc-approve",
+                "name": "aave-wbtc-approve",
                 "type": "contract_call",
                 "rules": {
                     "effect": "allow",
                     "function_abis": approve_abi,
                     "when": {
                         "chain_in": [CHAIN_ID],
-                        "target_in": [{"chain_id": CHAIN_ID, "contract_addr": USDC, "function_id": SELECTOR_APPROVE}],
+                        "target_in": [{"chain_id": CHAIN_ID, "contract_addr": WBTC, "function_id": SELECTOR_APPROVE}],
                         "params_match": [
                             {"param_name": "spender", "op": "eq", "value": AAVE_POOL},
                             {"param_name": "amount", "op": "lte", "value": str(max_amount_units)},
@@ -234,7 +220,7 @@ def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int
                 },
             },
             {
-                "name": "aave-usdc-supply",
+                "name": "aave-wbtc-supply",
                 "type": "contract_call",
                 "rules": {
                     "effect": "allow",
@@ -243,7 +229,7 @@ def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int
                         "chain_in": [CHAIN_ID],
                         "target_in": [{"chain_id": CHAIN_ID, "contract_addr": AAVE_POOL, "function_id": SELECTOR_SUPPLY}],
                         "params_match": [
-                            {"param_name": "asset", "op": "eq", "value": USDC},
+                            {"param_name": "asset", "op": "eq", "value": WBTC},
                             {"param_name": "amount", "op": "lte", "value": str(max_amount_units)},
                             {"param_name": "onBehalfOf", "op": "eq", "value": wallet_address},
                             {"param_name": "referralCode", "op": "eq", "value": "0"},
@@ -253,7 +239,7 @@ def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int
                 },
             },
             {
-                "name": "aave-usdc-withdraw",
+                "name": "aave-wbtc-withdraw",
                 "type": "contract_call",
                 "rules": {
                     "effect": "allow",
@@ -262,32 +248,12 @@ def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int
                         "chain_in": [CHAIN_ID],
                         "target_in": [{"chain_id": CHAIN_ID, "contract_addr": AAVE_POOL, "function_id": SELECTOR_WITHDRAW}],
                         "params_match": [
-                            {"param_name": "asset", "op": "eq", "value": USDC},
+                            {"param_name": "asset", "op": "eq", "value": WBTC},
                             {"param_name": "amount", "op": "lte", "value": str(max_amount_units)},
                             {"param_name": "to", "op": "eq", "value": wallet_address},
                         ],
                     },
                     "deny_if": {"usage_limits": {"rolling_24h": {"tx_count_gt": 3}}},
-                },
-            },
-            {
-                "name": "aave-usdc-faucet",
-                "type": "contract_call",
-                "rules": {
-                    "effect": "allow",
-                    "function_abis": faucet_abi,
-                    "when": {
-                        "chain_in": [CHAIN_ID],
-                        "target_in": [
-                            {"chain_id": CHAIN_ID, "contract_addr": AAVE_FAUCET, "function_id": SELECTOR_FAUCET_MINT}
-                        ],
-                        "params_match": [
-                            {"param_name": "token", "op": "eq", "value": USDC},
-                            {"param_name": "to", "op": "eq", "value": wallet_address},
-                            {"param_name": "amount", "op": "lte", "value": str(max_amount_units)},
-                        ],
-                    },
-                    "deny_if": {"usage_limits": {"rolling_24h": {"tx_count_gt": 2}}},
                 },
             },
         ],
@@ -297,17 +263,16 @@ def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int
         ],
         "execution_plan": (
             "# Summary\n"
-            "Allow strategy-scoped Aave V3 Sepolia USDC operations.\n\n"
+            f"Allow strategy-scoped Aave V3 Sepolia {ASSET_SYMBOL} operations.\n\n"
             "# Operations\n"
-            "- Claim test USDC from the official Aave Sepolia faucet\n"
-            "- Approve the Aave Pool to pull USDC\n"
-            "- Supply USDC to Aave V3 on behalf of the CAW wallet\n"
-            "- Withdraw USDC back to the same CAW wallet\n\n"
+            f"- Approve the Aave Pool to pull {ASSET_SYMBOL}\n"
+            f"- Supply {ASSET_SYMBOL} to Aave V3 on behalf of the CAW wallet\n"
+            f"- Withdraw {ASSET_SYMBOL} back to the same CAW wallet\n\n"
             "# Risk Controls\n"
-            f"- Asset allowlist: USDC {USDC}\n"
+            f"- Asset allowlist: {ASSET_SYMBOL} {WBTC}\n"
             f"- Pool allowlist: {AAVE_POOL}\n"
             f"- Wallet recipient/onBehalfOf: {wallet_address}\n"
-            f"- Max amount per call: {max_amount_units} raw USDC units\n"
+            f"- Max amount per call: {max_amount_units} raw {ASSET_SYMBOL} units\n"
             "- 7 day pact duration"
         ),
     }
@@ -334,10 +299,6 @@ def encode_withdraw(asset: str, amount_units: int, to: str) -> str:
     return SELECTOR_WITHDRAW + _encode_address(asset) + _encode_uint(amount_units) + _encode_address(to)
 
 
-def encode_faucet_mint(token: str, to: str, amount_units: int) -> str:
-    return SELECTOR_FAUCET_MINT + _encode_address(token) + _encode_address(to) + _encode_uint(amount_units)
-
-
 def encode_balance_of(owner: str) -> str:
     return SELECTOR_BALANCE_OF + _encode_address(owner)
 
@@ -354,6 +315,26 @@ async def _read_erc20_balance(token: str, owner: str) -> int:
 async def _read_erc20_allowance(token: str, owner: str, spender: str) -> int:
     result = await eth_call(chain_id=CHAIN_ID, to=token, data=encode_allowance(owner, spender), from_address=owner)
     return _decode_uint_result(result)
+
+
+async def _wait_for_allowance(owner: str, required_units: int, *, attempts: int = 24, delay_seconds: int = 5) -> int:
+    allowance_units = await _read_erc20_allowance(WBTC, owner, AAVE_POOL)
+    for _ in range(attempts):
+        if allowance_units >= required_units:
+            return allowance_units
+        await asyncio.sleep(delay_seconds)
+        allowance_units = await _read_erc20_allowance(WBTC, owner, AAVE_POOL)
+    return allowance_units
+
+
+async def _wait_for_aave_balance(owner: str, required_units: int, *, attempts: int = 24, delay_seconds: int = 5) -> int:
+    aave_units = await _read_erc20_balance(AWBTC, owner)
+    for _ in range(attempts):
+        if aave_units >= required_units:
+            return aave_units
+        await asyncio.sleep(delay_seconds)
+        aave_units = await _read_erc20_balance(AWBTC, owner)
+    return aave_units
 
 
 def _decode_uint_result(result: dict[str, Any]) -> int:

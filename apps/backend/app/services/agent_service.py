@@ -22,7 +22,7 @@ from app.services.treasury_service import (
     send_asset,
     submit_internal_rebalance_pact,
 )
-from app.services.aave_service import execute_aave_faucet_claim, execute_aave_supply, execute_aave_withdraw, get_aave_wallet_state
+from app.services.aave_service import execute_aave_supply, execute_aave_withdraw, get_aave_wallet_state
 
 
 CAW_KEYWORDS = ("wallet", "audit", "logs", "caw", "balance", "钱包", "日志", "余额", "状态")
@@ -34,7 +34,7 @@ TREASURY_STATUS_KEYWORDS = ("策略状态", "treasury", "资金状态", "稳定�
 REBALANCE_KEYWORDS = ("rebalance", "再平衡", "调仓", "每日计算", "每天计算")
 INITIALIZE_KEYWORDS = ("初始化", "存入", "deposit")
 APPROVE_KEYWORDS = ("approve pact", "批准 pact", "审批 pact", "通过 pact")
-AAVE_KEYWORDS = ("aave", "Aave", "生息", "supply", "withdraw", "faucet", "领取")
+AAVE_KEYWORDS = ("aave", "Aave", "生息", "supply", "withdraw")
 
 
 async def handle_user_message(message: str) -> dict[str, Any]:
@@ -94,12 +94,6 @@ async def handle_user_message(message: str) -> dict[str, Any]:
         proposal = await submit_internal_rebalance_pact(parameters["amount"])
         wallet = {"treasury": await get_treasury_state()}
         tool_results["aave_pact"] = proposal
-
-    if action == "aave_faucet":
-        result = await execute_aave_faucet_claim(pact_id=parameters.get("pact_id", ""), amount=parameters["amount"])
-        wallet = {"treasury": await get_treasury_state(), "aave": result.get("aave")}
-        proposal = result
-        tool_results["aave_faucet"] = result
 
     if action == "aave_supply":
         result = await execute_aave_supply(pact_id=parameters.get("pact_id", ""), amount=parameters["amount"])
@@ -250,8 +244,6 @@ def _infer_action(message: str, normalized: str) -> str:
         if "pact" in normalized or "授权" in message:
             return "aave_submit_pact"
         return "aave_status"
-    if "领取" in message or "faucet" in normalized:
-        return "aave_faucet"
     if "supply" in normalized or "存入 aave" in normalized or "存入Aave" in message:
         return "aave_supply"
     if "withdraw" in normalized or "取出" in message:
@@ -294,10 +286,14 @@ def _merge_parameters(defaults: dict[str, Any], llm_parameters: Any) -> dict[str
 
 
 def _build_transfer_parameters(message: str) -> dict[str, Any]:
-    amount_match = re.search(r"(\d+(?:\.\d+)?)\s*([A-Z_]*USDC|[A-Z_]*USDT|[A-Z_]*DAI|U|SETH)?", message, re.IGNORECASE)
+    amount_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*([A-Z_]*WBTC|[A-Z_]*USDC|[A-Z_]*USDT|[A-Z_]*DAI|BTC|U|SETH)?",
+        message,
+        re.IGNORECASE,
+    )
     amount = amount_match.group(1) if amount_match else "1"
-    raw_token = amount_match.group(2).upper() if amount_match and amount_match.group(2) else "SETH_USDC"
-    token_id = "SETH_USDC" if raw_token == "U" else raw_token
+    raw_token = amount_match.group(2).upper() if amount_match and amount_match.group(2) else "SETH_WBTC"
+    token_id = "SETH_USDC" if raw_token == "U" else "SETH_WBTC" if raw_token == "BTC" else raw_token
     chain_id = _extract_value(message, ("chain", "chain_id", "链")) or _chain_from_token(token_id)
     destination = _extract_destination(message)
 
@@ -380,8 +376,10 @@ def _build_balance_summary(
     return {
         "wallet_address": aave.get("wallet_address"),
         "native_balances": native_balances,
-        "sepolia_usdc": aave.get("wallet_balance", "0"),
-        "aave_ausdc": aave.get("aave_balance", "0"),
+        "aave_asset": aave.get("asset", treasury.get("asset", "asset")),
+        "aave_yield_asset": aave.get("a_token_asset", f"a{aave.get('asset', treasury.get('asset', 'asset'))}"),
+        "wallet_strategy_balance": aave.get("wallet_balance", "0"),
+        "aave_strategy_balance": aave.get("aave_balance", "0"),
         "pool_allowance": aave.get("pool_allowance", "0"),
         "recommended_liquidity": treasury.get("recommendation", {}).get("recommended_liquidity"),
     }
@@ -400,9 +398,9 @@ def _merged_wallet_summary(wallet_status: dict[str, Any]) -> str:
     return (
         f"Wallet address: {balance_summary.get('wallet_address') or 'unknown'}. "
         f"Native balances: {native_text}. "
-        f"Sepolia USDC: {balance_summary['sepolia_usdc']}. "
-        f"Aave aUSDC: {balance_summary['aave_ausdc']}. "
-        f"Recommended liquidity: {balance_summary.get('recommended_liquidity') or 'n/a'} USDC."
+        f"Sepolia {balance_summary['aave_asset']}: {balance_summary['wallet_strategy_balance']}. "
+        f"Aave {balance_summary['aave_yield_asset']}: {balance_summary['aave_strategy_balance']}. "
+        f"Recommended liquidity: {balance_summary.get('recommended_liquidity') or 'n/a'} {balance_summary['aave_asset']}."
     )
 
 
@@ -427,7 +425,7 @@ def _treasury_summary(treasury: dict[str, Any]) -> str:
 
 
 def _contains_stable_amount(message: str) -> bool:
-    return re.search(r"\d+(?:\.\d+)?\s*(?:U|USDC|USDT|DAI)", message, re.IGNORECASE) is not None
+    return re.search(r"\d+(?:\.\d+)?\s*(?:BTC|WBTC|U|USDC|USDT|DAI)", message, re.IGNORECASE) is not None
 
 
 def _extract_pact_id(message: str) -> str:
