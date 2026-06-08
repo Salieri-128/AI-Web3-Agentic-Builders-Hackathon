@@ -20,11 +20,9 @@ from app.schemas import (
     TreasuryTransferRequest,
 )
 from app.services.aave_service import (
-    execute_aave_faucet_claim,
     execute_aave_supply,
     execute_aave_withdraw,
     get_aave_wallet_state,
-    submit_aave_rebalance_pact,
 )
 from app.services.agent_service import handle_user_message
 from app.services.caw_service import get_audit_logs, get_wallet_status, is_caw_configured, submit_transfer_pact, transfer_tokens_with_pact
@@ -36,6 +34,7 @@ from app.services.treasury_service import (
     initialize_wallet,
     run_daily_rebalance,
     send_asset,
+    submit_internal_rebalance_pact,
 )
 
 
@@ -167,14 +166,8 @@ async def aave_state() -> CawActionResponse:
 
 @app.post("/api/aave/pacts", response_model=CawActionResponse)
 async def aave_submit_pact(request: AavePactRequest) -> CawActionResponse:
-    result = await submit_aave_rebalance_pact(max_amount=request.max_amount)
+    result = await submit_internal_rebalance_pact(max_amount=request.max_amount)
     return CawActionResponse(status=str(result.get("status", "submitted")), message="Aave contract-call pact submitted", data=result)
-
-
-@app.post("/api/aave/faucet", response_model=CawActionResponse)
-async def aave_faucet(request: AaveActionRequest) -> CawActionResponse:
-    result = await execute_aave_faucet_claim(pact_id=request.pact_id, amount=request.amount)
-    return CawActionResponse(status=str(result.get("status", "ok")), message="Aave faucet claim completed", data=result)
 
 
 @app.post("/api/aave/supply", response_model=CawActionResponse)

@@ -29,7 +29,7 @@ class ChatResponse(BaseModel):
 class PactProposalRequest(BaseModel):
     intent: str
     chain_id: str = "SETH"
-    token_id: str = "SETH_USDC"
+    token_id: str = "SETH_WBTC"
     destination: str
     amount: str
     max_amount_usd: str | None = None

@@ -28,23 +28,23 @@ TREASURY_DIR = ROOT_DIR / "data" / "users" / "demo"
 TREASURY_STATE_PATH = TREASURY_DIR / "wallet_state.json"
 TREASURY_EVENTS_PATH = TREASURY_DIR / "events.jsonl"
 
-ASSET = "USDC"
-TOKEN_ID = "SETH_USDC"
+ASSET = "WBTC"
+TOKEN_ID = "SETH_WBTC"
 CHAIN_ID = "SETH"
 PROTOCOL = "Aave"
 
 
 DEFAULT_STRATEGY: dict[str, Any] = {
-    "base_buffer": "10",
+    "base_buffer": "0.05",
     "default_liquidity_ratio": "0.20",
     "default_yield_ratio": "0.80",
     "min_liquidity_ratio": "0.10",
     "risk_multiplier": "1.20",
     "single_tx_multiplier": "1.50",
     "gas_safety_multiplier": "1.20",
-    "min_rebalance_amount": "5",
+    "min_rebalance_amount": "0.001",
     "aave_apy": "0.02",
-    "gas_fee_asset": "0.2",
+    "gas_fee_asset": "0.0001",
     "rebalance_horizon_days": 7,
 }
 
@@ -64,9 +64,6 @@ async def initialize_wallet(deposit_amount: str | None = None) -> dict[str, Any]
     state["asset"] = ASSET
     state["chain_id"] = CHAIN_ID
     state["strategy"] = {**DEFAULT_STRATEGY, **state.get("strategy", {})}
-    if not _find_known_internal_pact(state):
-        await submit_internal_rebalance_pact(deposit_amount or "100")
-        state = _load_state()
     state["updated_at"] = _now_iso()
     _save_state(state)
     _reset_events()
@@ -119,13 +116,16 @@ async def run_daily_rebalance() -> dict[str, Any]:
             pact_id = _find_known_internal_caw_pact_id(state)
             if pact_id:
                 execution = await execute_aave_supply(pact_id=pact_id, amount=_fmt(excess))
-                decision = {
-                    "action": "supply_to_aave",
-                    "amount": _fmt(excess),
-                    "reason": "Wallet has excess USDC liquidity, so the agent executed Aave supply through CAW Pact.",
-                    "pact_required": "internal_agent_rebalance",
-                    "execution": execution,
-                }
+                if _execution_succeeded(execution):
+                    decision = {
+                        "action": "supply_to_aave",
+                        "amount": _fmt(excess),
+                        "reason": f"Wallet has excess {ASSET} liquidity, so the agent executed Aave supply through CAW Pact.",
+                        "pact_required": "internal_agent_rebalance",
+                        "execution": execution,
+                    }
+                else:
+                    decision = _execution_failed_decision("supply_to_aave", _fmt(excess), execution)
             else:
                 pact = await submit_internal_rebalance_pact(_fmt(excess))
                 decision = {
@@ -140,13 +140,16 @@ async def run_daily_rebalance() -> dict[str, Any]:
         pact_id = _find_known_internal_caw_pact_id(state)
         if pact_id:
             execution = await execute_aave_withdraw(pact_id=pact_id, amount=_fmt(shortage))
-            decision = {
-                "action": "withdraw_from_aave",
-                "amount": _fmt(shortage),
-                "reason": "Wallet USDC liquidity is below recommendation, so the agent executed Aave withdraw through CAW Pact.",
-                "pact_required": "internal_agent_rebalance",
-                "execution": execution,
-            }
+            if _execution_succeeded(execution):
+                decision = {
+                    "action": "withdraw_from_aave",
+                    "amount": _fmt(shortage),
+                    "reason": f"Wallet {ASSET} liquidity is below recommendation, so the agent executed Aave withdraw through CAW Pact.",
+                    "pact_required": "internal_agent_rebalance",
+                    "execution": execution,
+                }
+            else:
+                decision = _execution_failed_decision("withdraw_from_aave", _fmt(shortage), execution)
         else:
             pact = await submit_internal_rebalance_pact(_fmt(shortage))
             decision = {
@@ -157,12 +160,13 @@ async def run_daily_rebalance() -> dict[str, Any]:
                 "pact": pact,
             }
 
-    state["last_rebalance_at"] = _now_iso()
+    if decision["action"] != "execution_failed":
+        state["last_rebalance_at"] = _now_iso()
     state["updated_at"] = _now_iso()
     _save_state(state)
     _append_event({"type": "daily_rebalance", "decision": decision, "recommendation": recommendation})
     return {
-        "status": decision["action"],
+        "status": "execution_failed" if decision["action"] == "execution_failed" else decision["action"],
         "decision": decision,
         "recommendation": recommendation,
         "treasury": await get_treasury_state(),
@@ -336,7 +340,7 @@ async def submit_internal_rebalance_pact(max_amount: str = "100") -> dict[str, A
     pact = _build_internal_rebalance_pact(
         max_amount=max_amount,
         status="pending_owner_approval" if _extract_caw_pact_id(result) else "caw_submission_failed",
-        reason="CAW Aave contract-call pact for Sepolia USDC faucet, approve, supply, and withdraw.",
+        reason=f"CAW Aave contract-call pact for Sepolia {ASSET} approve, supply, and withdraw.",
     )
     pact["caw_submission"] = result
     pact["caw_pact_id"] = _extract_caw_pact_id(result)
@@ -384,7 +388,26 @@ def _merge_state_defaults(state: dict[str, Any]) -> dict[str, Any]:
     merged["asset"] = ASSET
     merged["chain_id"] = CHAIN_ID
     merged["strategy"] = {**DEFAULT_STRATEGY, **state.get("strategy", {})}
+    merged["pacts"] = [_normalize_pact(pact) for pact in state.get("pacts", []) if _should_keep_pact(pact)]
     return merged
+
+
+def _normalize_pact(pact: dict[str, Any]) -> dict[str, Any]:
+    if pact.get("pact_type") != "internal_agent_rebalance":
+        return pact
+    pact = copy.deepcopy(pact)
+    if isinstance(pact.get("reason"), str):
+        pact["reason"] = pact["reason"].replace("faucet, ", "")
+    return pact
+
+
+def _should_keep_pact(pact: dict[str, Any]) -> bool:
+    if pact.get("pact_type") != "internal_agent_rebalance":
+        return True
+    if not pact.get("caw_pact_id"):
+        return False
+    serialized = json.dumps(pact, ensure_ascii=False).lower()
+    return "faucet" not in serialized
 
 
 def _append_event(event: dict[str, Any]) -> None:
@@ -466,7 +489,11 @@ def _find_known_internal_pact(state: dict[str, Any]) -> dict[str, Any] | None:
 
 def _find_known_internal_caw_pact_id(state: dict[str, Any]) -> str | None:
     for pact in state.get("pacts", []):
-        if pact.get("pact_type") == "internal_agent_rebalance" and pact.get("caw_pact_id"):
+        if (
+            pact.get("pact_type") == "internal_agent_rebalance"
+            and pact.get("status") == "active"
+            and pact.get("caw_pact_id")
+        ):
             return str(pact["caw_pact_id"])
     return None
 
@@ -476,6 +503,21 @@ def _find_pact_by_any_id(state: dict[str, Any], pact_id: str) -> dict[str, Any] 
         if pact_id in (pact.get("pact_id"), pact.get("caw_pact_id")):
             return pact
     return None
+
+
+def _execution_succeeded(execution: dict[str, Any]) -> bool:
+    return execution.get("status") == "ok"
+
+
+def _execution_failed_decision(intended_action: str, amount: str, execution: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action": "execution_failed",
+        "intended_action": intended_action,
+        "amount": amount,
+        "reason": "CAW Pact execution failed, so the Aave strategy was not completed.",
+        "pact_required": "internal_agent_rebalance",
+        "execution": execution,
+    }
 
 
 def _find_matching_caw_transfer_pact(state: dict[str, Any], destination: str, amount: Decimal) -> str | None:

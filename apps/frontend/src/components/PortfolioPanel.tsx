@@ -19,6 +19,8 @@ const PRICE_USD: Record<string, number> = {
   SETH: 3500,
   USDC: 1,
   aUSDC: 1,
+  WBTC: 69000,
+  aWBTC: 69000,
 };
 
 export function PortfolioPanel({ wallet, treasury }: PortfolioPanelProps) {
@@ -91,26 +93,29 @@ function buildAssets(wallet: WalletStatus | null, treasury: TreasuryState | null
     });
   }
 
-  const walletUsdc = Number(treasury?.aave?.wallet_balance ?? treasury?.balances.wallet ?? 0);
-  if (Number.isFinite(walletUsdc) && walletUsdc > 0) {
+  const strategyAsset = treasury?.aave?.asset ?? treasury?.asset ?? "WBTC";
+  const strategyAToken = treasury?.aave?.a_token_asset ?? `a${strategyAsset}`;
+
+  const walletStrategyBalance = Number(treasury?.aave?.wallet_balance ?? treasury?.balances.wallet ?? 0);
+  if (Number.isFinite(walletStrategyBalance) && walletStrategyBalance > 0) {
     upsertAsset(assets, {
       chain: treasury?.chain_id ?? "SETH",
-      symbol: "USDC",
+      symbol: strategyAsset,
       label: "Wallet balance",
-      amount: walletUsdc,
-      priceUsd: PRICE_USD.USDC,
-      source: "aave-wallet-usdc",
+      amount: walletStrategyBalance,
+      priceUsd: PRICE_USD[strategyAsset] ?? 0,
+      source: "aave-wallet-asset",
     });
   }
 
-  const aaveUsdc = Number(treasury?.aave?.aave_balance ?? treasury?.balances.yield ?? 0);
-  if (Number.isFinite(aaveUsdc) && aaveUsdc > 0) {
+  const aaveStrategyBalance = Number(treasury?.aave?.aave_balance ?? treasury?.balances.yield ?? 0);
+  if (Number.isFinite(aaveStrategyBalance) && aaveStrategyBalance > 0) {
     assets.push({
       chain: treasury?.chain_id ?? "SETH",
-      symbol: "aUSDC",
+      symbol: strategyAToken,
       label: "Aave supplied balance",
-      amount: aaveUsdc,
-      priceUsd: PRICE_USD.aUSDC,
+      amount: aaveStrategyBalance,
+      priceUsd: PRICE_USD[strategyAToken] ?? PRICE_USD[strategyAsset] ?? 0,
       source: "aave-yield",
     });
   }
