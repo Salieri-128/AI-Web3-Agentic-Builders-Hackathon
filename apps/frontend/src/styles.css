@@ -78,6 +78,13 @@ input {
   max-width: 960px;
 }
 
+.strategy-data-layout {
+  display: grid;
+  gap: 18px;
+  margin: 0 auto;
+  max-width: 1360px;
+}
+
 .panel {
   background: #ffffff;
   border: 1px solid #dce4ee;
@@ -213,7 +220,20 @@ input {
   white-space: nowrap;
 }
 
+.danger-action-button {
+  background: #ffffff;
+  border: 1px solid #ef9a9a;
+  border-radius: 8px;
+  color: #b42318;
+  cursor: pointer;
+  font-weight: 800;
+  min-height: 42px;
+  padding: 9px 16px;
+  white-space: nowrap;
+}
+
 .primary-action-button:disabled,
+.danger-action-button:disabled,
 .secondary-button:disabled,
 .text-button:disabled {
   cursor: not-allowed;
@@ -265,6 +285,14 @@ input {
   line-height: 1.6;
   margin: 10px 0 0;
   max-width: 680px;
+}
+
+.strategy-actions {
+  align-items: stretch;
+  display: grid;
+  gap: 8px;
+  justify-items: stretch;
+  min-width: 124px;
 }
 
 .strategy-status-strip {
@@ -351,6 +379,130 @@ input {
   font-size: 22px;
   line-height: 1.2;
   overflow-wrap: anywhere;
+}
+
+.strategy-data-summary {
+  display: grid;
+  gap: 16px;
+}
+
+.formula-block {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.formula-block span {
+  color: #657588;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.formula-block code {
+  color: #17202a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.strategy-data-kpis {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.strategy-data-kpis div,
+.strategy-data-card {
+  background: #ffffff;
+  border: 1px solid #dce4ee;
+  border-radius: 8px;
+}
+
+.strategy-data-kpis div {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+}
+
+.strategy-data-kpis span {
+  color: #657588;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.strategy-data-kpis strong {
+  color: #17202a;
+  font-size: 22px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.strategy-data-kpis small {
+  color: #667789;
+}
+
+.strategy-data-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.strategy-data-card {
+  box-shadow: 0 12px 34px rgba(34, 50, 84, 0.08);
+  min-width: 0;
+  padding: 18px;
+}
+
+.strategy-data-card h2 {
+  color: #253142;
+  font-size: 16px;
+  margin: 0 0 14px;
+}
+
+.strategy-data-card dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.strategy-data-card dl div {
+  align-items: start;
+  border-bottom: 1px solid #edf1f5;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, auto);
+  padding-bottom: 10px;
+}
+
+.strategy-data-card dl div:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.strategy-data-card dt {
+  display: grid;
+  gap: 3px;
+}
+
+.strategy-data-card dt span {
+  color: #253142;
+  font-weight: 800;
+}
+
+.strategy-data-card dt small {
+  color: #667789;
+  line-height: 1.4;
+}
+
+.strategy-data-card dd {
+  color: #17202a;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .modal-backdrop {
@@ -744,6 +896,10 @@ dd {
   .history-layout {
     grid-template-columns: 1fr;
   }
+
+  .strategy-data-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -755,9 +911,19 @@ dd {
   .chat-form,
   .action-row,
   .strategy-hero,
+  .strategy-actions,
   .funds-overview,
+  .strategy-data-kpis,
   .history-layout {
     grid-template-columns: 1fr;
+  }
+
+  .strategy-data-card dl div {
+    grid-template-columns: 1fr;
+  }
+
+  .strategy-data-card dd {
+    text-align: left;
   }
 
   .portfolio-summary,
