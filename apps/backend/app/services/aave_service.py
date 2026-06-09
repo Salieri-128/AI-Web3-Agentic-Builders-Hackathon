@@ -8,6 +8,7 @@ from typing import Any
 from app.services.caw_service import (
     contract_call_with_pact,
     eth_call,
+    get_transaction_by_request_id,
     get_wallet_status,
     is_caw_configured,
     submit_contract_call_pact,
@@ -26,6 +27,7 @@ ASSET_DECIMALS = 8
 SELECTOR_APPROVE = "0x095ea7b3"
 SELECTOR_SUPPLY = "0x617ba037"
 SELECTOR_WITHDRAW = "0x69328dec"
+SELECTOR_TRANSFER = "0xa9059cbb"
 SELECTOR_BALANCE_OF = "0x70a08231"
 SELECTOR_ALLOWANCE = "0xdd62ed3e"
 
@@ -163,6 +165,53 @@ async def execute_aave_withdraw(pact_id: str, amount: str) -> dict[str, Any]:
     }
 
 
+async def submit_wbtc_transfer_pact(*, destination: str, max_amount: str, tx_count: int) -> dict[str, Any]:
+    max_units = _parse_units(max_amount, ASSET_DECIMALS)
+    spec = build_wbtc_transfer_pact_spec(destination=destination, max_amount_units=max_units, tx_count=tx_count)
+    return await submit_contract_call_pact(
+        intent=(
+            f"Allow up to {tx_count} Sepolia {ASSET_SYMBOL} transfer(s) to {destination}, "
+            f"with each transfer capped at {max_amount} {ASSET_SYMBOL}."
+        ),
+        name="sepolia-wbtc-external-transfer",
+        spec=spec,
+    )
+
+
+async def execute_wbtc_transfer(pact_id: str, destination: str, amount: str) -> dict[str, Any]:
+    wallet_address = await get_caw_evm_address()
+    if not wallet_address:
+        return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
+    amount_units = _parse_units(amount, ASSET_DECIMALS)
+    starting_destination_units = await _read_erc20_balance(WBTC, destination)
+    calldata = encode_transfer(destination, amount_units)
+    request_id = f"agentic-treasury-{uuid.uuid4()}"
+    transfer_result = await contract_call_with_pact(
+        pact_id=pact_id,
+        chain_id=CHAIN_ID,
+        contract_addr=WBTC,
+        src_addr=wallet_address,
+        calldata=calldata,
+        request_id=request_id,
+        description=f"Transfer {amount} {ASSET_SYMBOL} to {destination}",
+    )
+    final_destination_units = await _wait_for_token_balance(WBTC, destination, starting_destination_units + amount_units)
+    transaction = await _wait_for_caw_transaction_detail(request_id)
+    gas_fee = _extract_caw_gas_fee(transaction)
+    return {
+        "status": "ok" if final_destination_units >= starting_destination_units + amount_units else str(transfer_result.get("status", "submitted")),
+        "operation": "wbtc_transfer",
+        "amount": amount,
+        "destination": destination,
+        "request_id": request_id,
+        "transaction": transaction,
+        "gas_fee": gas_fee,
+        "calldata": {"transfer": calldata},
+        "transfer": transfer_result,
+        "aave": await get_aave_wallet_state(),
+    }
+
+
 def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int) -> dict[str, Any]:
     approve_abi = [
         {
@@ -278,6 +327,56 @@ def build_aave_rebalance_pact_spec(*, wallet_address: str, max_amount_units: int
     }
 
 
+def build_wbtc_transfer_pact_spec(*, destination: str, max_amount_units: int, tx_count: int) -> dict[str, Any]:
+    transfer_abi = [
+        {
+            "type": "function",
+            "name": "transfer",
+            "selector": SELECTOR_TRANSFER,
+            "inputs": [
+                {"name": "to", "type": "address"},
+                {"name": "amount", "type": "uint256"},
+            ],
+        }
+    ]
+    return {
+        "policies": [
+            {
+                "name": "sepolia-wbtc-transfer",
+                "type": "contract_call",
+                "rules": {
+                    "effect": "allow",
+                    "function_abis": transfer_abi,
+                    "when": {
+                        "chain_in": [CHAIN_ID],
+                        "target_in": [{"chain_id": CHAIN_ID, "contract_addr": WBTC, "function_id": SELECTOR_TRANSFER}],
+                        "params_match": [
+                            {"param_name": "to", "op": "eq", "value": destination},
+                            {"param_name": "amount", "op": "lte", "value": str(max_amount_units)},
+                        ],
+                    },
+                },
+            }
+        ],
+        "completion_conditions": [
+            {"type": "tx_count", "threshold": str(max(1, tx_count))},
+            {"type": "time_elapsed", "threshold": "604800"},
+        ],
+        "execution_plan": (
+            "# Summary\n"
+            f"Allow Sepolia {ASSET_SYMBOL} transfer to {destination}.\n\n"
+            "# Operations\n"
+            f"- Call {ASSET_SYMBOL}.transfer(to, amount) on {WBTC}\n\n"
+            "# Risk Controls\n"
+            f"- Asset contract: {ASSET_SYMBOL} {WBTC}\n"
+            f"- Destination allowlist: {destination}\n"
+            f"- Max amount per transfer: {max_amount_units} raw {ASSET_SYMBOL} units\n"
+            f"- Transfer count cap: {max(1, tx_count)} transaction(s)\n"
+            "- Pact duration: 7 days"
+        ),
+    }
+
+
 async def get_caw_evm_address() -> str | None:
     wallet_status = await get_wallet_status()
     for address in wallet_status.get("addresses", []):
@@ -297,6 +396,10 @@ def encode_supply(asset: str, amount_units: int, on_behalf_of: str) -> str:
 
 def encode_withdraw(asset: str, amount_units: int, to: str) -> str:
     return SELECTOR_WITHDRAW + _encode_address(asset) + _encode_uint(amount_units) + _encode_address(to)
+
+
+def encode_transfer(to: str, amount_units: int) -> str:
+    return SELECTOR_TRANSFER + _encode_address(to) + _encode_uint(amount_units)
 
 
 def encode_balance_of(owner: str) -> str:
@@ -335,6 +438,94 @@ async def _wait_for_aave_balance(owner: str, required_units: int, *, attempts: i
         await asyncio.sleep(delay_seconds)
         aave_units = await _read_erc20_balance(AWBTC, owner)
     return aave_units
+
+
+async def _wait_for_token_balance(
+    token: str, owner: str, required_units: int, *, attempts: int = 24, delay_seconds: int = 5
+) -> int:
+    balance_units = await _read_erc20_balance(token, owner)
+    for _ in range(attempts):
+        if balance_units >= required_units:
+            return balance_units
+        await asyncio.sleep(delay_seconds)
+        balance_units = await _read_erc20_balance(token, owner)
+    return balance_units
+
+
+async def _wait_for_caw_transaction_detail(request_id: str, *, attempts: int = 12, delay_seconds: int = 3) -> dict[str, Any]:
+    detail: dict[str, Any] = {}
+    for _ in range(attempts):
+        detail = await get_transaction_by_request_id(request_id)
+        if _transaction_has_final_fee(detail):
+            return detail
+        await asyncio.sleep(delay_seconds)
+    return detail
+
+
+def _transaction_has_final_fee(detail: dict[str, Any]) -> bool:
+    if not detail or detail.get("status") == "error":
+        return False
+    tracker_metadata = _read_nested_dict(detail, ("tracker_result", "chain_tx", "metadata"))
+    if tracker_metadata.get("gas_used") not in (None, "") and tracker_metadata.get("effective_gas_price") not in (None, ""):
+        return True
+    for fee in _caw_fee_candidates(detail):
+        if any(fee.get(key) not in (None, "") for key in ("fee_used", "gas_used")):
+            return True
+    return False
+
+
+def _extract_caw_gas_fee(detail: dict[str, Any]) -> str:
+    tracker_metadata = _read_nested_dict(detail, ("tracker_result", "chain_tx", "metadata"))
+    gas_used = tracker_metadata.get("gas_used")
+    effective_gas_price = tracker_metadata.get("effective_gas_price")
+    if gas_used not in (None, "") and effective_gas_price not in (None, ""):
+        fee_used = (Decimal(str(gas_used)) * Decimal(str(effective_gas_price))) / Decimal("1000000000000000000")
+        return f"{fee_used.normalize()} SETH"
+    for fee in _caw_fee_candidates(detail):
+        token_id = fee.get("token_id")
+        fee_used = fee.get("fee_used")
+        if fee_used not in (None, ""):
+            return f"{fee_used} {token_id or ''}".strip()
+        estimated_fee_used = fee.get("estimated_fee_used")
+        if estimated_fee_used not in (None, ""):
+            return f"{estimated_fee_used} {token_id or ''} estimated".strip()
+        gas_used = fee.get("gas_used")
+        effective_gas_price = fee.get("effective_gas_price")
+        if gas_used not in (None, "") and effective_gas_price not in (None, ""):
+            return f"gas_used={gas_used}, effective_gas_price={effective_gas_price}"
+    status = detail.get("status_display") or detail.get("status")
+    if status and detail.get("status") != "error":
+        return f"CAW 交易详情暂未返回 fee（交易状态：{status}）"
+    return ""
+
+
+def _caw_fee_candidates(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for path in (
+        ("fee",),
+        ("data", "fee"),
+        ("prepared_tx", "fee"),
+        ("prepared_tx", "data", "fee"),
+    ):
+        fee = _read_nested_dict(detail, path)
+        if fee:
+            candidates.append(fee)
+    for ext_transaction in detail.get("ext_transactions", []):
+        if not isinstance(ext_transaction, dict):
+            continue
+        fee = _read_nested_dict(ext_transaction, ("data", "fee"))
+        if fee:
+            candidates.append(fee)
+    return candidates
+
+
+def _read_nested_dict(value: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+    current: Any = value
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
 
 
 def _decode_uint_result(result: dict[str, Any]) -> int:

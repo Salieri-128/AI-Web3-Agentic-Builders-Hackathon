@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -12,10 +13,11 @@ from app.services.caw_service import (
     submit_transfer_pact,
     transfer_tokens_with_pact,
 )
-from app.services.llm_service import compose_agent_reply, is_llm_configured, route_with_llm
+from app.services.llm_service import compose_agent_reply, decide_transfer_flow, is_llm_configured, route_with_llm
 from app.services.memory_service import load_profile, update_memory_from_message
 from app.services.treasury_service import (
     approve_local_pact,
+    create_external_transfer_pact,
     get_treasury_state,
     initialize_wallet,
     run_daily_rebalance,
@@ -47,8 +49,16 @@ async def handle_user_message(message: str) -> dict[str, Any]:
         else await _safe_llm_route(message, profile)
     )
 
-    action = inferred_action if inferred_action != "none" else llm_result.get("action", "none")
-    parameters = _merge_parameters(_build_transfer_parameters(message), llm_result.get("parameters", {}))
+    deterministic_transfer_parameters = _build_transfer_parameters(message)
+    action = _normalize_action(
+        inferred_action if inferred_action != "none" else str(llm_result.get("action", "none")),
+        deterministic_transfer_parameters,
+    )
+    parameters = (
+        deterministic_transfer_parameters
+        if action == "treasury_transfer"
+        else _merge_parameters(deterministic_transfer_parameters, llm_result.get("parameters", {}))
+    )
 
     caw_used = False
     memory_updated = False
@@ -76,12 +86,8 @@ async def handle_user_message(message: str) -> dict[str, Any]:
         tool_results["local_pact_approval"] = result
 
     if action == "treasury_transfer":
-        result = await send_asset(
-            destination=parameters["destination"],
-            amount=parameters["amount"],
-            pact_id=parameters.get("pact_id"),
-            execute=_contains_keyword(message, normalized, EXECUTE_KEYWORDS),
-        )
+        caw_used = True
+        result = await _run_llm_guided_transfer(message=message, profile=profile, parameters=parameters)
         wallet = {"treasury": result.get("treasury") or await get_treasury_state()}
         proposal = result.get("proposal") or result.get("pact")
         tool_results["treasury_transfer"] = result
@@ -138,7 +144,7 @@ async def handle_user_message(message: str) -> dict[str, Any]:
                 token_id=parameters["token_id"],
                 destination=parameters["destination"],
                 amount=parameters["amount"],
-                max_amount_usd=parameters.get("max_amount_usd"),
+                max_amount=parameters.get("max_amount", parameters["amount"]),
             )
             proposal["pact_submission"] = pact
             proposal["status"] = pact.get("status") or ("submitted" if pact.get("pact_id") else "submission_failed")
@@ -177,7 +183,7 @@ async def handle_user_message(message: str) -> dict[str, Any]:
 
     return {
         "reply": reply,
-        "llm_used": final_llm_used,
+        "llm_used": bool(llm_result.get("llm_used") or final_llm_used or _tool_results_used_llm(tool_results)),
         "caw_used": caw_used,
         "memory_updated": memory_updated,
         "proposal": proposal,
@@ -198,6 +204,10 @@ async def _final_agent_reply(
     proposal: dict[str, Any] | None,
     memory_updated: bool,
 ) -> tuple[str, bool]:
+    transfer_result = tool_results.get("treasury_transfer")
+    if isinstance(transfer_result, dict):
+        return _transfer_result_summary(transfer_result), False
+
     try:
         final_reply = await compose_agent_reply(
             message=message,
@@ -275,6 +285,13 @@ def _contains_keyword(message: str, normalized: str, keywords: tuple[str, ...]) 
     return any(keyword in normalized or keyword in message for keyword in keywords)
 
 
+def _normalize_action(action: str, transfer_parameters: dict[str, Any]) -> str:
+    if action in {"submit_pact", "transfer_proposal", "execute_transfer"}:
+        if transfer_parameters.get("destination") != "unknown_or_user_provided":
+            return "treasury_transfer"
+    return action
+
+
 def _merge_parameters(defaults: dict[str, Any], llm_parameters: Any) -> dict[str, Any]:
     if not isinstance(llm_parameters, dict):
         return defaults
@@ -286,14 +303,7 @@ def _merge_parameters(defaults: dict[str, Any], llm_parameters: Any) -> dict[str
 
 
 def _build_transfer_parameters(message: str) -> dict[str, Any]:
-    amount_match = re.search(
-        r"(\d+(?:\.\d+)?)\s*([A-Z_]*WBTC|[A-Z_]*USDC|[A-Z_]*USDT|[A-Z_]*DAI|BTC|U|SETH)?",
-        message,
-        re.IGNORECASE,
-    )
-    amount = amount_match.group(1) if amount_match else "1"
-    raw_token = amount_match.group(2).upper() if amount_match and amount_match.group(2) else "SETH_WBTC"
-    token_id = "SETH_USDC" if raw_token == "U" else "SETH_WBTC" if raw_token == "BTC" else raw_token
+    amount, token_id = _extract_transfer_amount_and_token(message)
     chain_id = _extract_value(message, ("chain", "chain_id", "链")) or _chain_from_token(token_id)
     destination = _extract_destination(message)
 
@@ -303,9 +313,221 @@ def _build_transfer_parameters(message: str) -> dict[str, Any]:
         "token_id": token_id,
         "amount": amount,
         "destination": destination,
-        "max_amount_usd": amount,
+        "max_amount": amount,
         "pact_id": _extract_pact_id(message),
     }
+
+
+async def _run_llm_guided_transfer(*, message: str, profile: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
+    decisions: list[dict[str, Any]] = []
+    treasury_state = await get_treasury_state()
+    balance_decision = await _safe_transfer_decision(
+        message=message,
+        profile=profile,
+        parameters=parameters,
+        stage="balance_checked",
+        tool_state={"balances": treasury_state.get("balances", {}), "asset": treasury_state.get("asset")},
+    )
+    decisions.append(balance_decision)
+    if balance_decision.get("decision") == "insufficient_balance":
+        return {
+            "status": "insufficient_wallet_balance",
+            "reason": balance_decision.get("reason") or "Wallet balance is lower than the requested transfer amount.",
+            "treasury": treasury_state,
+            "llm_transfer_decisions": decisions,
+        }
+
+    pact_decision = await _safe_transfer_decision(
+        message=message,
+        profile=profile,
+        parameters=parameters,
+        stage="pacts_checked",
+        tool_state={
+            "balances": treasury_state.get("balances", {}),
+            "pacts": _summarize_transfer_pacts(treasury_state.get("pacts", [])),
+        },
+    )
+    decisions.append(pact_decision)
+    if pact_decision.get("decision") in {"use_existing_pact", "execute_with_pact"} and pact_decision.get("pact_id"):
+        execution = await send_asset(
+            destination=parameters["destination"],
+            amount=parameters["amount"],
+            pact_id=str(pact_decision["pact_id"]),
+            execute=True,
+        )
+        execution["llm_transfer_decisions"] = decisions
+        return execution
+
+    proposal = await create_external_transfer_pact(parameters["destination"], parameters["amount"])
+    if not proposal.get("caw_pact_id"):
+        return {
+            "status": proposal.get("status", "pact_submission_failed"),
+            "reason": proposal.get("reason", "CAW did not return a Pact ID."),
+            "proposal": proposal,
+            "treasury": await get_treasury_state(),
+            "llm_transfer_decisions": decisions,
+        }
+
+    submitted_decision = await _safe_transfer_decision(
+        message=message,
+        profile=profile,
+        parameters=parameters,
+        stage="pact_submitted",
+        tool_state={"proposal": proposal},
+    )
+    decisions.append(submitted_decision)
+    return {
+        "status": "pact_required",
+        "reason": "Submitted a real CAW transfer Pact. Approve it in Cobo/CAW before execution.",
+        "proposal": proposal,
+        "treasury": await get_treasury_state(),
+        "llm_transfer_decisions": decisions,
+    }
+
+
+async def _safe_transfer_decision(
+    *,
+    message: str,
+    profile: dict[str, Any],
+    parameters: dict[str, Any],
+    stage: str,
+    tool_state: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        decision = await decide_transfer_flow(
+            message=message,
+            profile=profile,
+            transfer_request=_llm_transfer_request(parameters),
+            stage=stage,
+            tool_state=tool_state,
+        )
+        if decision.get("decision") != "fallback":
+            return decision
+    except Exception as error:
+        return {
+            "decision": _fallback_transfer_decision(stage, parameters, tool_state),
+            "pact_id": _fallback_transfer_pact_id(tool_state, parameters),
+            "reason": str(error),
+            "llm_used": False,
+        }
+    return {
+        "decision": _fallback_transfer_decision(stage, parameters, tool_state),
+        "pact_id": _fallback_transfer_pact_id(tool_state, parameters),
+        "reason": "Backend fallback decision.",
+        "llm_used": False,
+    }
+
+
+def _fallback_transfer_decision(stage: str, parameters: dict[str, Any], tool_state: dict[str, Any]) -> str:
+    if stage == "balance_checked":
+        wallet_balance = _safe_number(tool_state.get("balances", {}).get("wallet"))
+        amount = _safe_number(parameters.get("amount"))
+        return "insufficient_balance" if wallet_balance < amount else "use_existing_pact"
+    if stage == "pacts_checked":
+        return "use_existing_pact" if _fallback_transfer_pact_id(tool_state, parameters) else "submit_new_pact"
+    if stage == "pact_submitted":
+        return "wait_for_pact_approval"
+    if stage == "pact_approved":
+        return "execute_with_pact"
+    return "transfer_failed"
+
+
+def _llm_transfer_request(parameters: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "chain_id": parameters.get("chain_id"),
+        "token_id": parameters.get("token_id"),
+        "amount": parameters.get("amount"),
+        "max_amount": parameters.get("max_amount", parameters.get("amount")),
+        "destination": parameters.get("destination"),
+    }
+
+
+def _fallback_transfer_pact_id(tool_state: dict[str, Any], parameters: dict[str, Any]) -> str:
+    requested_amount = _safe_number(parameters.get("amount"))
+    for pact in tool_state.get("pacts", []):
+        if (
+            pact.get("status") == "active"
+            and pact.get("caw_pact_id")
+            and not pact.get("legacy_usd_cap")
+            and str(pact.get("destination_address", "")).lower() == str(parameters.get("destination", "")).lower()
+            and str(pact.get("chain_id", "")) == str(parameters.get("chain_id", ""))
+            and _safe_number(pact.get("max_single_amount")) >= requested_amount
+        ):
+            return str(pact["caw_pact_id"])
+    return ""
+
+
+def _summarize_transfer_pacts(pacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summarized = []
+    for pact in pacts:
+        if pact.get("pact_type") != "external_transfer":
+            continue
+        scope = pact.get("scope", {})
+        serialized = str(pact)
+        summarized.append(
+            {
+                "pact_id": pact.get("pact_id"),
+                "caw_pact_id": pact.get("caw_pact_id"),
+                "status": pact.get("status"),
+                "destination_address": scope.get("destination_address"),
+                "asset": scope.get("asset"),
+                "chain_id": scope.get("chain_id"),
+                "max_single_amount": scope.get("max_single_amount"),
+                "weekly_amount_cap": scope.get("weekly_amount_cap"),
+                "weekly_tx_cap": scope.get("weekly_tx_cap"),
+                "legacy_usd_cap": "amount_usd_gt" in serialized or "SETH_WBTC" in serialized,
+                "duration": pact.get("duration"),
+            }
+        )
+    return summarized
+
+
+async def _wait_for_transfer_pact_active(pact_id: str) -> dict[str, Any]:
+    for _ in range(120):
+        result = await approve_local_pact(pact_id)
+        pact = result.get("pact") if isinstance(result, dict) else {}
+        status = str(result.get("status") or pact.get("status") or "")
+        if status == "active":
+            return {
+                "status": "active",
+                "pact": pact,
+                "caw_pact_id": pact.get("caw_pact_id") or pact_id,
+                "message": "Pact approved by owner.",
+            }
+        if status in {"revoked", "rejected", "declined", "caw_submission_failed", "error"}:
+            return {"status": status, "pact": pact, "message": f"Pact approval stopped with status {status}."}
+        await asyncio.sleep(3)
+    return {
+        "status": "pending_owner_approval",
+        "pact_id": pact_id,
+        "message": "Pact is still waiting for owner approval in CAW App.",
+    }
+
+
+def _extract_transfer_amount_and_token(message: str) -> tuple[str, str]:
+    token_pattern = r"(SETH_WBTC|SETH_USDC|SETH_USDT|SETH_DAI|WBTC|USDC|USDT|DAI|BTC|U)"
+    token_amount_match = re.search(rf"(\d+(?:\.\d+)?)\s*{token_pattern}\b", message, re.IGNORECASE)
+    if token_amount_match:
+        return token_amount_match.group(1), _normalize_token_id(token_amount_match.group(2))
+
+    amount_after_verb = re.search(r"(?:转|transfer|send|支付)\s*(\d+(?:\.\d+)?)", message, re.IGNORECASE)
+    if amount_after_verb:
+        return amount_after_verb.group(1), "WBTC"
+
+    return "1", "WBTC"
+
+
+def _normalize_token_id(raw_token: str) -> str:
+    token = raw_token.upper()
+    if token in {"BTC", "WBTC", "SETH_WBTC"}:
+        return "WBTC"
+    if token in {"U", "USDC", "SETH_USDC"}:
+        return "USDC"
+    if token in {"USDT", "SETH_USDT"}:
+        return "USDT"
+    if token in {"DAI", "SETH_DAI"}:
+        return "DAI"
+    return token
 
 
 def _build_transfer_proposal(parameters: dict[str, Any], action: str) -> dict[str, Any]:
@@ -314,7 +536,7 @@ def _build_transfer_proposal(parameters: dict[str, Any], action: str) -> dict[st
         token_id=parameters["token_id"],
         destination=parameters["destination"],
         amount=parameters["amount"],
-        max_amount_usd=parameters.get("max_amount_usd", parameters["amount"]),
+        max_amount=parameters.get("max_amount", parameters["amount"]),
     )
     return {
         "type": "transfer",
@@ -333,6 +555,114 @@ def _caw_status_reply(success_text: str) -> str:
     if not is_caw_configured():
         return CAW_NOT_CONFIGURED_MESSAGE
     return success_text
+
+
+def _transfer_result_summary(result: dict[str, Any]) -> str:
+    status = str(result.get("status", "unknown"))
+    proposal = result.get("proposal") or {}
+    approval_wait = result.get("approval_wait") or {}
+    if approval_wait.get("status") == "pending_owner_approval":
+        return "新的 CAW Pact 已提交，但仍在等待 owner 审批。请在 Cobo/CAW App 中 approve，Agent 检测到 active 后会继续执行转账。"
+    if approval_wait.get("status") and approval_wait.get("status") != "active":
+        if approval_wait.get("status") == "revoked":
+            return "这个 CAW Pact 已被撤销，本次转账未执行。再次发起转账时，Agent 会重新检查余额和可用 Pact，并在需要时提交新的 Pact。"
+        return str(approval_wait.get("message") or f"Pact 审批状态为 {approval_wait.get('status')}，转账尚未执行。")
+    if status == "pact_required":
+        return (
+            "已为这笔转账提交新的 CAW Pact。请在 Cobo/CAW App 中 approve，"
+            "Agent 会在检测到授权生效后继续执行转账。"
+        )
+    if status in {"ok", "success", "submitted"} or result.get("transaction_id") or result.get("uuid"):
+        gas_text = _extract_gas_fee_text(result)
+        if result.get("auto_executed_after_approval"):
+            return f"Pact 已审批通过，Agent 已继续执行转账，结果已写入审计日志。Gas fee：{gas_text}。"
+        return f"转账已按可用 CAW Pact 执行，结果已写入审计日志。Gas fee：{gas_text}。"
+    reason = _extract_result_reason(result)
+    if reason:
+        return reason
+    if proposal:
+        return "已处理转账请求，并生成了对应的 Pact/执行结果。"
+    return f"转账流程状态：{status}"
+
+
+def _extract_result_reason(result: dict[str, Any]) -> str:
+    for candidate in (
+        result.get("reason"),
+        result.get("message"),
+        result.get("execution", {}).get("reason") if isinstance(result.get("execution"), dict) else None,
+        result.get("execution", {}).get("message") if isinstance(result.get("execution"), dict) else None,
+    ):
+        if candidate:
+            return str(candidate)
+    return ""
+
+
+def _extract_gas_fee_text(result: dict[str, Any]) -> str:
+    execution = result.get("execution") if isinstance(result.get("execution"), dict) else {}
+    transfer = execution.get("transfer") if isinstance(execution.get("transfer"), dict) else {}
+    transaction = execution.get("transaction") if isinstance(execution.get("transaction"), dict) else {}
+    transaction_fee = _first_fee_dict(transaction)
+    candidates = (
+        result.get("gas_fee"),
+        result.get("fee"),
+        result.get("gas_cost"),
+        execution.get("gas_fee"),
+        execution.get("fee"),
+        execution.get("gas_cost"),
+        transfer.get("gas_fee"),
+        transfer.get("fee"),
+        transfer.get("gas_cost"),
+        transfer.get("transaction_fee"),
+        transfer.get("fee_amount"),
+        transaction_fee.get("fee_used"),
+        transaction_fee.get("estimated_fee_used"),
+    )
+    for candidate in candidates:
+        if candidate not in (None, ""):
+            token_id = transaction_fee.get("token_id")
+            if candidate in (transaction_fee.get("fee_used"), transaction_fee.get("estimated_fee_used")) and token_id:
+                return f"{candidate} {token_id}"
+            return str(candidate)
+    transfer_status = transfer.get("status_display") or transfer.get("status")
+    if transfer_status:
+        return f"CAW 返回结果中未提供（交易状态：{transfer_status}）"
+    transaction_status = transaction.get("status")
+    if transaction_status:
+        return f"CAW 交易详情暂未返回 fee（交易状态：{transaction_status}）"
+    return "CAW 返回结果中未提供"
+
+
+def _first_fee_dict(transaction: dict[str, Any]) -> dict[str, Any]:
+    for path in (("fee",), ("data", "fee"), ("prepared_tx", "fee")):
+        current: Any = transaction
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        if isinstance(current, dict):
+            return current
+    for ext_transaction in transaction.get("ext_transactions", []):
+        if not isinstance(ext_transaction, dict):
+            continue
+        data = ext_transaction.get("data")
+        if isinstance(data, dict) and isinstance(data.get("fee"), dict):
+            return data["fee"]
+    return {}
+
+
+def _tool_results_used_llm(tool_results: dict[str, Any]) -> bool:
+    transfer_result = tool_results.get("treasury_transfer")
+    if not isinstance(transfer_result, dict):
+        return False
+    return any(decision.get("llm_used") for decision in transfer_result.get("llm_transfer_decisions", []))
+
+
+def _safe_number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _wallet_status_summary(wallet_status: dict[str, Any] | None) -> str:
@@ -434,7 +764,7 @@ def _extract_pact_id(message: str) -> str:
 
 
 def _chain_from_token(token_id: str) -> str:
-    if "_" in token_id:
+    if token_id.startswith("SETH_"):
         return token_id.split("_", 1)[0]
     return "SETH"
 

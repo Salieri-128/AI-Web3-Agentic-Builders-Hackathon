@@ -66,18 +66,21 @@ async def submit_transfer_pact(
     token_id: str,
     destination: str,
     amount: str,
+    max_amount: str | None = None,
     max_amount_usd: str | None = None,
+    tx_count: int = 1,
 ) -> dict[str, Any]:
     if not is_caw_configured():
         return {"reason": CAW_NOT_CONFIGURED_MESSAGE}
 
-    cap = max_amount_usd or amount
+    cap = max_amount or max_amount_usd or amount
     spec = build_transfer_pact_spec(
         chain_id=chain_id,
         token_id=token_id,
         destination=destination,
         amount=amount,
-        max_amount_usd=cap,
+        max_amount=cap,
+        tx_count=tx_count,
     )
     try:
         async with _wallet_client() as client:
@@ -116,6 +119,22 @@ async def get_pact(pact_id: str) -> dict[str, Any]:
         async with _wallet_client() as client:
             pact = await client.get_pact(pact_id)
             return _redact_sensitive(_as_dict(pact))
+    except Exception as error:
+        return _service_error(error)
+
+
+async def get_transaction_by_request_id(request_id: str, *, ext: bool = True) -> dict[str, Any]:
+    if not is_caw_configured():
+        return {"reason": CAW_NOT_CONFIGURED_MESSAGE}
+
+    try:
+        async with _wallet_client() as client:
+            result = await client.get_user_transaction_by_request_id(
+                _required_caw_wallet_id(),
+                request_id,
+                ext=ext,
+            )
+            return _redact_sensitive(_as_dict(result))
     except Exception as error:
         return _service_error(error)
 
@@ -190,6 +209,12 @@ async def transfer_tokens_with_pact(
 
     try:
         async with _wallet_client() as owner_client:
+            source_address = await _get_wallet_source_address(owner_client, chain_id)
+            if not source_address:
+                return {
+                    "status": "missing_wallet_source_address",
+                    "reason": f"No wallet source address returned for chain {chain_id}.",
+                }
             pact = await owner_client.get_pact(pact_id)
             pact_dict = _as_dict(pact)
             if pact_dict.get("status") != "active":
@@ -205,6 +230,7 @@ async def transfer_tokens_with_pact(
             result = await pact_client.transfer_tokens(
                 _required_caw_wallet_id(),
                 chain_id=chain_id,
+                src_addr=source_address,
                 dst_addr=destination,
                 token_id=token_id,
                 amount=amount,
@@ -221,9 +247,12 @@ def build_transfer_pact_spec(
     token_id: str,
     destination: str,
     amount: str,
-    max_amount_usd: str,
+    max_amount: str | None = None,
+    max_amount_usd: str | None = None,
+    tx_count: int = 1,
 ) -> dict[str, Any]:
     # The pact is the permission boundary: it allowlists chain, token, destination, and caps spend.
+    amount_cap = max_amount or max_amount_usd or amount
     return {
         "policies": [
             {
@@ -236,11 +265,14 @@ def build_transfer_pact_spec(
                         "token_in": [{"chain_id": chain_id, "token_id": token_id}],
                         "destination_address_in": [{"chain_id": chain_id, "address": destination}],
                     },
-                    "deny_if": {"amount_usd_gt": max_amount_usd},
+                    "deny_if": {"amount_gt": amount_cap},
                 },
             }
         ],
-        "completion_conditions": [{"type": "tx_count", "threshold": "1"}],
+        "completion_conditions": [
+            {"type": "tx_count", "threshold": str(max(1, tx_count))},
+            {"type": "time_elapsed", "threshold": "604800"},
+        ],
         "execution_plan": (
             "# Summary\n"
             f"Transfer {amount} {token_id} to {destination} on {chain_id}.\n\n"
@@ -248,8 +280,9 @@ def build_transfer_pact_spec(
             f"- Transfer {amount} {token_id} on {chain_id}\n\n"
             "# Risk Controls\n"
             f"- Destination allowlist: {destination}\n"
-            f"- Max spend cap: {max_amount_usd} USD\n"
-            "- One-time transfer only"
+            f"- Max transfer amount per transaction: {amount_cap} {token_id}\n"
+            f"- Transfer count cap: {max(1, tx_count)} transaction(s)\n"
+            "- Pact duration: 7 days"
         ),
     }
 
@@ -293,6 +326,21 @@ async def _safe_items_call(client: Any, method_name: str, *args: Any, **kwargs: 
         else:
             response = await _maybe_await(method(*args))
     return _coerce_items(response)
+
+
+async def _get_wallet_source_address(client: Any, chain_id: str) -> str:
+    wallet_id = _required_caw_wallet_id()
+    addresses = await _safe_items_call(client, "list_wallet_addresses", wallet_id)
+    for address in addresses:
+        address_value = str(_read_field(address, "address") or "")
+        address_chain = str(_read_field(address, "chain_id") or "")
+        if address_chain == chain_id and address_value.startswith("0x") and len(address_value) == 42:
+            return address_value
+    for address in addresses:
+        address_value = str(_read_field(address, "address") or "")
+        if address_value.startswith("0x") and len(address_value) == 42:
+            return address_value
+    return ""
 
 
 async def _call_list_audit_logs(client: Any, wallet_id: str, result: str | None, limit: int) -> Any:

@@ -30,6 +30,8 @@ from app.services.llm_service import is_llm_configured
 from app.services.memory_service import is_memory_loaded, load_profile
 from app.services.treasury_service import (
     approve_local_pact,
+    execute_ready_pending_transfer,
+    get_pending_transfer_status,
     get_treasury_state,
     initialize_wallet,
     run_daily_rebalance,
@@ -150,6 +152,18 @@ async def treasury_transfer(request: TreasuryTransferRequest) -> CawActionRespon
         execute=request.execute,
     )
     return CawActionResponse(status=str(result.get("status", "ok")), message="Transfer flow completed", data=result)
+
+
+@app.post("/api/treasury/transfers/pending/execute", response_model=CawActionResponse)
+async def treasury_execute_pending_transfer() -> CawActionResponse:
+    result = await execute_ready_pending_transfer()
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Pending transfer check completed", data=result)
+
+
+@app.get("/api/treasury/transfers/pending/status", response_model=CawActionResponse)
+async def treasury_pending_transfer_status() -> CawActionResponse:
+    result = await get_pending_transfer_status()
+    return CawActionResponse(status=str(result.get("status", "ok")), message="Pending transfer status loaded", data=result)
 
 
 @app.post("/api/treasury/pacts/approve", response_model=CawActionResponse)
