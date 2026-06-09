@@ -187,6 +187,24 @@ export async function rebalanceTreasury(): Promise<Record<string, unknown>> {
   return payload.data;
 }
 
+export async function executePendingTransfer(): Promise<Record<string, unknown>> {
+  const response = await fetch(`${backendUrl}/api/treasury/transfers/pending/execute`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to check pending transfer");
+  }
+  const payload = await response.json();
+  return payload.data;
+}
+
+export async function fetchPendingTransferStatus(): Promise<Record<string, unknown>> {
+  const response = await fetch(`${backendUrl}/api/treasury/transfers/pending/status`);
+  if (!response.ok) {
+    throw new Error("Failed to load pending transfer status");
+  }
+  const payload = await response.json();
+  return payload.data;
+}
+
 export async function approveTreasuryPact(pactId: string): Promise<Record<string, unknown>> {
   const response = await fetch(`${backendUrl}/api/treasury/pacts/approve`, {
     method: "POST",

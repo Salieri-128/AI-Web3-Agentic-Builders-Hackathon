@@ -133,3 +133,117 @@
 - 修改：apps/backend/app/services/aave_service.py, DEVELOPMENT_LOG.md
 - 意图：approve 提交后等待 allowance 生效，再自动执行 Aave supply
 - 备注：已完成 0.9 WBTC supply，当前钱包 0.1 WBTC、Aave 0.9 aWBTC
+
+## 2026-06-09 - 完善生息策略前端状态
+
+- 修改：apps/frontend/src/App.tsx, apps/frontend/src/components/TreasuryPanel.tsx, apps/frontend/src/styles.css
+- 意图：刷新后根据 Aave 仓位保持策略运行态，并支持取消策略取回资产
+- 备注：取消策略复用已授权 Aave withdraw Pact
+
+## 2026-06-09 - 新增策略数据页
+
+- 修改：apps/frontend/src/App.tsx, apps/frontend/src/components/StrategyDataPanel.tsx, apps/frontend/src/styles.css
+- 意图：展示保留流动性公式、用户画像、转账统计和策略参数
+- 备注：复用现有 treasury/profile 数据
+
+## 2026-06-09 - 串联 Chat 转账 Pact 流程
+
+- 修改：apps/backend/app/services/agent_service.py, apps/backend/app/services/treasury_service.py, apps/backend/app/services/caw_service.py, apps/frontend/src/components/ChatPanel.tsx
+- 意图：用户发起转账后自动检查 Pact、必要时提交并等待审批后执行
+- 备注：修正地址中的 0x 被误识别为转账金额
+
+## 2026-06-09 - 约束 LLM 资金流程边界
+
+- 修改：apps/backend/app/services/llm_service.py, apps/backend/app/services/agent_service.py
+- 意图：让 LLM 只做意图判断，资金转账统一由工具层固定流程执行
+- 备注：转账结果回复不再交给 LLM 重新解释
+
+## 2026-06-09 - 修正转账 Pact 限制
+
+- 修改：apps/backend/app/services/caw_service.py, apps/backend/app/services/treasury_service.py, apps/backend/app/services/agent_service.py
+- 意图：转账 Pact 使用 token 数量上限和 7 天时效，并明确审批后自动执行状态
+- 备注：旧美元上限 transfer Pact 不再复用
+
+## 2026-06-09 - 修正旧 Pact 识别
+
+- 修改：apps/backend/app/services/treasury_service.py, apps/backend/app/services/agent_service.py
+- 意图：跳过已 active 但使用美元上限的旧 transfer Pact，并展示具体执行错误
+- 备注：旧 Pact 可保留但不会再被本地匹配使用
+
+## 2026-06-09 - 改为 LLM 引导转账流程
+
+- 修改：apps/backend/app/services/llm_service.py, apps/backend/app/services/agent_service.py
+- 意图：让 LLM 根据余额和 Pact 工具结果判断下一步，工具层继续执行硬约束
+- 备注：成功回复会展示 CAW 返回的 gas fee
+
+## 2026-06-09 - 修正 CAW 转账源地址
+
+- 修改：apps/backend/app/services/caw_service.py
+- 意图：调用 CAW transfer_tokens 时传入钱包 src_addr
+- 备注：避免 CAW API 返回 src_addr missing 的 422
+
+## 2026-06-09 - 修正本地 Pact ID 映射
+
+- 修改：apps/backend/app/services/treasury_service.py
+- 意图：执行转账前将本地 pact_id 解析为 CAW pact UUID
+- 备注：避免 CAW API 将 pact-transfer-local-* 当作 UUID 导致 422
+
+## 2026-06-09 - Review 外部转账字段链路
+
+- 修改：apps/backend/app/services/caw_service.py, apps/backend/app/services/agent_service.py
+- 意图：确保 CAW transfer_tokens 所需 wallet_id、src_addr、dst_addr、token_id、amount 等字段完整传递
+- 备注：移除 contract_call 路径误加的源地址查询
+
+## 2026-06-09 - 修正 CAW 转账 Token ID
+
+- 修改：apps/backend/app/services/agent_service.py, apps/backend/app/services/llm_service.py, apps/backend/app/services/treasury_service.py
+- 意图：外部转账使用 CAW 可识别的 WBTC token_id，链用 SETH 单独传递
+- 备注：含 SETH_WBTC 的旧 transfer Pact 不再复用
+
+## 2026-06-09 - 修正撤销 Pact 后复用
+
+- 修改：apps/backend/app/services/treasury_service.py, apps/backend/app/services/agent_service.py
+- 意图：每次转账前刷新 external Pact 状态，只允许 active 且匹配的 Pact 执行
+- 备注：revoked/pending/legacy Pact 不再被 LLM fallback 或后端匹配复用
+
+## 2026-06-09 - 改用 ERC20 Contract Call 转账
+
+- 修改：apps/backend/app/services/aave_service.py, apps/backend/app/services/treasury_service.py, apps/backend/app/services/agent_service.py
+- 意图：Sepolia Aave WBTC 不走 CAW 内置 token transfer，改为 WBTC.transfer contract_call
+- 备注：Pact 限制 WBTC 合约、目标地址、raw amount、次数和 7 天时效
+
+## 2026-06-09 - 移除 LLM 转账 USD 限额
+
+- 修改：apps/backend/app/services/agent_service.py, apps/backend/app/services/llm_service.py
+- 意图：外部转账请求只向 LLM 暴露 token 数量约束，避免按 USD 限额误判
+- 备注：amount/max_amount 均为同币种数量
+
+## 2026-06-09 - 补齐 Pact 生效后继续转账
+
+- 修改：apps/backend/app/main.py, apps/backend/app/services/treasury_service.py, apps/backend/app/services/agent_service.py, apps/frontend/src/App.tsx, apps/frontend/src/api.ts
+- 意图：Pact approve 后由前端轮询后端 pending transfer 执行入口继续 WBTC 转账
+- 备注：本地 Pact 记录保存 pending_execution 的目标地址和金额
+
+## 2026-06-09 - 优化转账监听和 Gas 展示
+
+- 修改：apps/backend/app/main.py, apps/backend/app/services/treasury_service.py, apps/backend/app/services/agent_service.py, apps/frontend/src/App.tsx, apps/frontend/src/api.ts
+- 意图：Pact 生效后先提示正在交易，并在 CAW 未返回 gas fee 时展示交易状态
+- 备注：新增 pending transfer status 查询入口
+
+## 2026-06-09 - 查询 CAW 交易详情费用
+
+- 修改：apps/backend/app/services/caw_service.py, apps/backend/app/services/aave_service.py, apps/backend/app/services/agent_service.py, apps/frontend/src/App.tsx
+- 意图：转账提交后按 request_id 查询 Cobo 交易详情并展示 fee
+- 备注：兼容交易详情尚未返回 fee 的处理中状态
+
+## 2026-06-09 - 区分转账等待和执行状态
+
+- 修改：apps/frontend/src/App.tsx, apps/frontend/src/components/ChatPanel.tsx, apps/backend/app/services/aave_service.py, apps/backend/app/services/agent_service.py
+- 意图：已有 Pact 时前端显示交易中，并从 CAW 详情多路径提取 gas fee
+- 备注：优先展示实际链上 gas，缺失时展示 estimated fee
+
+## 2026-06-09 - 修正新 Pact 转账返回链路
+
+- 修改：apps/backend/app/services/agent_service.py, apps/backend/app/services/aave_service.py, apps/frontend/src/App.tsx
+- 意图：新 Pact 提交后立即返回给前端监听，避免长请求断连覆盖成功结果
+- 备注：状态刷新失败不再覆盖聊天主回复

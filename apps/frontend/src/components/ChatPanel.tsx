@@ -11,10 +11,11 @@ export type ChatTurn = {
 type ChatPanelProps = {
   messages: ChatTurn[];
   isSending: boolean;
+  pendingText?: string;
   onSend: (message: string) => Promise<void>;
 };
 
-export function ChatPanel({ messages, isSending, onSend }: ChatPanelProps) {
+export function ChatPanel({ messages, isSending, pendingText, onSend }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
 
   async function submit(event: FormEvent) {
@@ -49,7 +50,7 @@ export function ChatPanel({ messages, isSending, onSend }: ChatPanelProps) {
                   <span>Agent</span>
                   <b>Thinking</b>
                 </div>
-                <p>正在理解你的问题，并调用可用工具查询结果...</p>
+                <p>{pendingText || "正在处理请求..."}</p>
               </article>
             )}
           </>
