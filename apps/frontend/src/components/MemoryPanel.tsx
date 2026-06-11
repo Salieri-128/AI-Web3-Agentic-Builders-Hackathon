@@ -16,26 +16,13 @@ export function MemoryPanel({ profile }: MemoryPanelProps) {
       </div>
       <dl className="status-list">
         <Row label="risk_level" value={preferences?.risk_level ?? "unknown"} />
-        <Row label="cash_buffer_usdc" value={String(preferences?.cash_buffer_usdc ?? "not set")} />
-        <Row label="prefers_low_gas" value={String(habits?.prefers_low_gas ?? "unknown")} />
+        <Row label="liquidity_floor" value={String(preferences?.liquidity_floor ?? "not set")} />
         <Row
-          label="requires_confirmation"
-          value={String(habits?.requires_confirmation_before_execution ?? "unknown")}
+          label="liquidity_horizon_days"
+          value={String(preferences?.liquidity_horizon_days ?? "system default")}
         />
+        <Row label="prefers_low_gas" value={String(habits?.prefers_low_gas ?? "unknown")} />
       </dl>
-
-      <div className="notes-block">
-        <h2>notes</h2>
-        {profile?.notes && profile.notes.length > 0 ? (
-          <ul>
-            {profile.notes.map((note, index) => (
-              <li key={`${note}-${index}`}>{note}</li>
-            ))}
-          </ul>
-        ) : (
-          <p className="empty-state">No memory notes yet.</p>
-        )}
-      </div>
     </section>
   );
 }

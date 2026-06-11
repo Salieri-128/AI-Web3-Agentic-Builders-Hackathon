@@ -273,3 +273,8 @@
 - 修改：项目级 frontend-design skill、前端壳层、聊天空状态和全局样式
 - 意图：强化 CAW 权限边界与资金控制台的信息层级
 - 备注：保留原有页面结构和后端交互
+
+## 2026-06-12 - 用户画像驱动流动性保留
+- 修改：memory、treasury policy、workspace sync、聊天确认卡和 Policy Data
+- 意图：让画像经用户确认后可解释地改变流动性保留建议
+- 备注：画像不修改 CAW Pact 或执行权限

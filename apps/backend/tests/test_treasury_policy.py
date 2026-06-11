@@ -4,6 +4,7 @@ import unittest
 from decimal import Decimal
 
 from app.services.treasury_policy import (
+    build_effective_strategy,
     calculate_liquidity_target,
     calculate_rebalance_economics,
     plan_transfer,
@@ -25,6 +26,52 @@ STRATEGY = {
 
 
 class TreasuryPolicyTests(unittest.TestCase):
+    def test_conservative_profile_increases_liquidity_buffers(self) -> None:
+        effective, impacts = build_effective_strategy(
+            STRATEGY,
+            {
+                "user_preferences": {
+                    "risk_level": "conservative",
+                    "liquidity_horizon_days": 14,
+                },
+                "transaction_habits": {"prefers_low_gas": False},
+            },
+        )
+
+        self.assertEqual(effective["min_liquidity_ratio"], "0.15")
+        self.assertEqual(effective["risk_multiplier"], "1.50")
+        self.assertEqual(effective["single_tx_multiplier"], "2.00")
+        self.assertEqual(effective["liquidity_horizon_days"], 14)
+        self.assertTrue(impacts)
+
+    def test_aggressive_profile_never_crosses_system_safety_floors(self) -> None:
+        effective, _ = build_effective_strategy(
+            STRATEGY,
+            {
+                "user_preferences": {"risk_level": "aggressive"},
+                "transaction_habits": {"prefers_low_gas": False},
+            },
+        )
+
+        self.assertGreaterEqual(Decimal(effective["min_liquidity_ratio"]), Decimal("0.05"))
+        self.assertGreaterEqual(Decimal(effective["risk_multiplier"]), Decimal("1"))
+        self.assertGreaterEqual(Decimal(effective["single_tx_multiplier"]), Decimal("1"))
+
+    def test_low_gas_profile_raises_rebalance_threshold(self) -> None:
+        effective, impacts = build_effective_strategy(
+            STRATEGY,
+            {
+                "user_preferences": {"risk_level": "balanced"},
+                "transaction_habits": {"prefers_low_gas": True},
+            },
+        )
+
+        self.assertEqual(effective["min_rebalance_amount"], "0.01")
+        self.assertEqual(effective["gas_safety_multiplier"], "1.5")
+        self.assertTrue(
+            any(impact["profile_field"] == "prefers_low_gas" for impact in impacts)
+        )
+
     def test_liquidity_target_uses_largest_constraint(self) -> None:
         result = calculate_liquidity_target(
             total_balance="1",

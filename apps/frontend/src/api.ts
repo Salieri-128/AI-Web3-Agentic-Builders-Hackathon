@@ -8,18 +8,38 @@ export type StatusResponse = {
 
 export type Profile = {
   user_preferences?: {
-    cash_buffer_usdc?: string | number | null;
     liquidity_floor?: string | number | null;
-    risk_level?: string;
-    preferred_assets?: string[];
-    blocked_assets?: string[];
-    whitelisted_addresses?: string[];
+    liquidity_horizon_days?: number | null;
+    risk_level?: "conservative" | "balanced" | "aggressive";
   };
   transaction_habits?: {
     prefers_low_gas?: boolean;
-    requires_confirmation_before_execution?: boolean;
   };
-  notes?: string[];
+};
+
+export type MemoryProposal = {
+  proposal_id: string;
+  status: string;
+  message: string;
+  patch: Record<string, string | number | boolean | null>;
+  changes: Array<{
+    field: string;
+    before: string | number | boolean | null;
+    after: string | number | boolean | null;
+  }>;
+  liquidity_impact: {
+    asset: string;
+    changed: boolean;
+    before: LiquidityImpact;
+    after: LiquidityImpact;
+  };
+};
+
+type LiquidityImpact = {
+  recommended_liquidity: string;
+  target_yield_balance: string;
+  candidates: Record<string, string>;
+  effective_strategy: Record<string, string | number>;
 };
 
 export type Proposal = {
@@ -52,6 +72,7 @@ export type ChatResponse = {
   llm_used: boolean;
   caw_used: boolean;
   memory_updated: boolean;
+  memory_proposal?: MemoryProposal | null;
   proposal: Proposal | null;
   wallet: WalletStatus | null;
   audit_logs: AuditLog[];
@@ -91,6 +112,15 @@ export type TreasuryState = {
     total: string;
   };
   strategy: Record<string, string | number>;
+  base_strategy?: Record<string, string | number>;
+  effective_strategy?: Record<string, string | number>;
+  profile_impacts?: Array<{
+    profile_field: string;
+    strategy_field: string;
+    before: string | number;
+    after: string | number;
+  }>;
+  candidate_sources?: Record<string, string>;
   transfer_stats_7d: {
     weekly_transfer_count: number;
     weekly_transfer_sum: string;
@@ -161,6 +191,16 @@ export type RebalancePreview = {
   liquidity: NonNullable<TreasuryState["liquidity"]>;
 };
 
+export type WorkspaceSyncResult = {
+  status: string;
+  synced_at: string;
+  incoming_amount: string;
+  profile: Profile;
+  treasury: TreasuryState;
+  preview: RebalancePreview;
+  system_status: StatusResponse;
+};
+
 const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
 
 export async function fetchStatus(): Promise<StatusResponse> {
@@ -177,6 +217,34 @@ export async function fetchProfile(): Promise<Profile> {
     throw new Error("Failed to load memory profile");
   }
   return response.json();
+}
+
+export async function confirmMemoryProposal(proposalId: string): Promise<{
+  proposal: MemoryProposal;
+  profile: Profile;
+  treasury: TreasuryState;
+}> {
+  return updateMemoryProposal("confirm", proposalId);
+}
+
+export async function rejectMemoryProposal(proposalId: string): Promise<{
+  proposal: MemoryProposal;
+  profile: Profile;
+}> {
+  return updateMemoryProposal("reject", proposalId);
+}
+
+async function updateMemoryProposal(action: "confirm" | "reject", proposalId: string) {
+  const response = await fetch(`${backendUrl}/api/profile/proposals/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_id: proposalId }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to ${action} memory proposal`);
+  }
+  const payload = await response.json();
+  return payload.data;
 }
 
 export async function sendChat(message: string): Promise<ChatResponse> {
@@ -246,6 +314,15 @@ export async function syncTreasury(): Promise<Record<string, unknown>> {
   const response = await fetch(`${backendUrl}/api/treasury/sync`, { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to sync treasury balances");
+  }
+  const payload = await response.json();
+  return payload.data;
+}
+
+export async function syncWorkspace(): Promise<WorkspaceSyncResult> {
+  const response = await fetch(`${backendUrl}/api/workspace/sync`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to synchronize workspace");
   }
   const payload = await response.json();
   return payload.data;

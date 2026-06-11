@@ -14,12 +14,17 @@ from app.services.caw_service import (
     transfer_tokens_with_pact,
 )
 from app.services.llm_service import compose_agent_reply, decide_transfer_flow, is_llm_configured, route_with_llm
-from app.services.memory_service import load_profile, update_memory_from_message
+from app.services.memory_service import (
+    build_profile_proposal,
+    load_profile,
+    store_profile_proposal,
+)
 from app.services.treasury_service import (
     approve_local_pact,
     create_external_transfer_pact,
     get_treasury_state,
     initialize_wallet,
+    preview_profile_liquidity,
     run_daily_rebalance,
     send_asset,
     submit_internal_rebalance_pact,
@@ -28,7 +33,6 @@ from app.services.aave_service import execute_aave_supply, execute_aave_withdraw
 
 
 CAW_KEYWORDS = ("wallet", "audit", "logs", "caw", "balance", "钱包", "日志", "余额", "状态")
-MEMORY_KEYWORDS = ("记住", "偏好", "profile", "preference", "以后")
 PACT_KEYWORDS = ("pact", "授权", "approval", "approve", "权限")
 PROPOSAL_KEYWORDS = ("转账", "转", "transfer", "支付", "swap", "交易")
 EXECUTE_KEYWORDS = ("execute", "执行", "send now", "提交交易")
@@ -43,6 +47,9 @@ async def handle_user_message(message: str) -> dict[str, Any]:
     profile = load_profile()
     normalized = message.lower()
     inferred_action = _infer_action(message, normalized)
+    memory_draft = build_profile_proposal(message)
+    if memory_draft is not None:
+        inferred_action = "memory_update"
     llm_result = (
         {"reply": "Using local deterministic routing for wallet safety flow.", "llm_used": False}
         if inferred_action != "none"
@@ -62,6 +69,7 @@ async def handle_user_message(message: str) -> dict[str, Any]:
 
     caw_used = False
     memory_updated = False
+    memory_proposal: dict[str, Any] | None = None
     proposal: dict[str, Any] | None = None
     wallet: dict[str, Any] | None = None
     audit_logs: list[dict[str, Any]] = []
@@ -113,10 +121,14 @@ async def handle_user_message(message: str) -> dict[str, Any]:
         proposal = result
         tool_results["aave_withdraw"] = result
 
-    if _contains_keyword(message, normalized, MEMORY_KEYWORDS) or action == "memory_update":
-        profile, updates = update_memory_from_message(message)
-        memory_updated = True
-        tool_results["memory"] = {"updated": memory_updated, "updates": updates, "profile": profile}
+    if memory_draft is not None:
+        impact = await preview_profile_liquidity(memory_draft["proposed_profile"])
+        memory_proposal = store_profile_proposal(memory_draft, impact)
+        tool_results["memory"] = {
+            "updated": False,
+            "awaiting_confirmation": True,
+            "proposal": memory_proposal,
+        }
 
     if action == "wallet_status":
         caw_used = True
@@ -179,6 +191,7 @@ async def handle_user_message(message: str) -> dict[str, Any]:
         audit_logs=audit_logs,
         proposal=proposal,
         memory_updated=memory_updated,
+        memory_proposal=memory_proposal,
     )
 
     return {
@@ -186,6 +199,7 @@ async def handle_user_message(message: str) -> dict[str, Any]:
         "llm_used": bool(llm_result.get("llm_used") or final_llm_used or _tool_results_used_llm(tool_results)),
         "caw_used": caw_used,
         "memory_updated": memory_updated,
+        "memory_proposal": memory_proposal,
         "proposal": proposal,
         "wallet": wallet,
         "audit_logs": audit_logs,
@@ -203,10 +217,20 @@ async def _final_agent_reply(
     audit_logs: list[dict[str, Any]],
     proposal: dict[str, Any] | None,
     memory_updated: bool,
+    memory_proposal: dict[str, Any] | None,
 ) -> tuple[str, bool]:
     transfer_result = tool_results.get("treasury_transfer")
     if isinstance(transfer_result, dict):
         return _transfer_result_summary(transfer_result), False
+    if memory_proposal is not None:
+        impact = memory_proposal.get("liquidity_impact", {})
+        before = impact.get("before", {}).get("recommended_liquidity", "unknown")
+        after = impact.get("after", {}).get("recommended_liquidity", "unknown")
+        return (
+            f"我整理了一份用户画像变更提案。确认后，建议保留流动性预计从 "
+            f"{before} WBTC 调整为 {after} WBTC；CAW Pact 权限不会改变。",
+            False,
+        )
 
     try:
         final_reply = await compose_agent_reply(
