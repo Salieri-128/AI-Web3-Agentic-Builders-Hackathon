@@ -8,6 +8,7 @@ import {
   AuditLog,
   approveTreasuryPact,
   ChatResponse,
+  confirmMemoryProposal,
   executePendingTransfer,
   fetchPendingTransferStatus,
   fetchProfile,
@@ -16,14 +17,17 @@ import {
   fetchWalletStatus,
   initializeTreasury,
   LocalPact,
+  MemoryProposal,
   Profile,
   Proposal,
   previewTreasuryRebalance,
   rebalanceTreasury,
+  rejectMemoryProposal,
   sendChat,
   StatusResponse,
   submitAavePact,
   syncTreasury,
+  syncWorkspace,
   TreasuryState,
   WalletStatus,
   withdrawAave,
@@ -101,6 +105,11 @@ function App() {
   const [strategyPhase, setStrategyPhase] = useState<StrategyPhase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [incomingNotice, setIncomingNotice] = useState<string | null>(null);
+  const [memoryProposal, setMemoryProposal] = useState<MemoryProposal | null>(null);
+  const [isMemoryBusy, setIsMemoryBusy] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
 
   useEffect(() => {
     refreshStatus();
@@ -128,10 +137,16 @@ function App() {
 
   async function refreshStatus() {
     try {
-      setStatus(await fetchStatus());
-      setProfile(await fetchProfile());
-      setWallet(await fetchWalletStatus());
-      setTreasury(await fetchTreasuryState());
+      const [nextStatus, nextProfile, nextWallet, nextTreasury] = await Promise.all([
+        fetchStatus(),
+        fetchProfile(),
+        fetchWalletStatus(),
+        fetchTreasuryState(),
+      ]);
+      setStatus(nextStatus);
+      setProfile(nextProfile);
+      setWallet(nextWallet);
+      setTreasury(nextTreasury);
       setError(null);
     } catch (currentError) {
       setError(currentError instanceof Error ? currentError.message : "Backend status failed");
@@ -162,6 +177,7 @@ function App() {
         },
       ]);
       setProposal(response.proposal);
+      setMemoryProposal(response.memory_proposal ?? null);
       setWallet(response.wallet ?? wallet);
       await refreshTreasuryAfterChat();
       setAuditLogs(response.audit_logs);
@@ -278,6 +294,86 @@ function App() {
       }
     } catch {
       // Background balance sync should not interrupt the active user flow.
+    }
+  }
+
+  async function handleSyncWorkspace() {
+    setIsSyncing(true);
+    setError(null);
+    const previousLiquidity = treasury?.recommendation.recommended_liquidity;
+    const previousPacts = treasury?.pacts.map((pact) => `${pact.pact_id}:${pact.status}`).join("|");
+    try {
+      const result = await syncWorkspace();
+      setStatus(result.system_status);
+      setProfile(result.profile);
+      setTreasury(result.treasury);
+      if (result.treasury.wallet_status) {
+        setWallet(result.treasury.wallet_status);
+      }
+      setLastSyncedAt(result.synced_at);
+
+      const nextLiquidity = result.treasury.recommendation.recommended_liquidity;
+      const nextPacts = result.treasury.pacts.map((pact) => `${pact.pact_id}:${pact.status}`).join("|");
+      const changes: string[] = [];
+      if (previousLiquidity && previousLiquidity !== nextLiquidity) {
+        changes.push(`建议保留从 ${previousLiquidity} 调整为 ${nextLiquidity} ${result.treasury.asset}`);
+      }
+      if (previousPacts !== undefined && previousPacts !== nextPacts) {
+        changes.push("Pact 状态已更新");
+      }
+      if (Number(result.incoming_amount) > 0) {
+        changes.push(`检测到 ${result.incoming_amount} ${result.treasury.asset} 新入账`);
+      }
+      setSyncNotice(changes.length ? changes.join("；") : "余额、Pact、画像和策略建议均已同步，没有发现变化。");
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Workspace sync failed");
+    } finally {
+      setIsSyncing(false);
+    }
+  }
+
+  async function handleConfirmMemory(proposalId: string) {
+    setIsMemoryBusy(true);
+    setError(null);
+    try {
+      const result = await confirmMemoryProposal(proposalId);
+      const impact = memoryProposal?.liquidity_impact;
+      setProfile(result.profile);
+      setTreasury(result.treasury);
+      setMemoryProposal(null);
+      setMessages((current) => [
+        ...current,
+        {
+          role: "agent",
+          content: impact
+            ? `画像已应用。建议保留流动性从 ${impact.before.recommended_liquidity} 调整为 ${impact.after.recommended_liquidity} ${impact.asset}。CAW Pact 权限未改变。`
+            : "画像已应用，流动性建议已重新计算。",
+          memoryUpdated: true,
+        },
+      ]);
+      setSyncNotice("用户画像已应用，流动性建议已重新计算。");
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Memory proposal failed");
+    } finally {
+      setIsMemoryBusy(false);
+    }
+  }
+
+  async function handleRejectMemory(proposalId: string) {
+    setIsMemoryBusy(true);
+    setError(null);
+    try {
+      const result = await rejectMemoryProposal(proposalId);
+      setProfile(result.profile);
+      setMemoryProposal(null);
+      setMessages((current) => [
+        ...current,
+        { role: "agent", content: "画像变更已拒绝，当前流动性策略保持不变。" },
+      ]);
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Memory proposal rejection failed");
+    } finally {
+      setIsMemoryBusy(false);
     }
   }
 
@@ -446,10 +542,18 @@ function App() {
               <span className={status?.llm_configured ? "ready" : ""}>LLM</span>
               <span className={status?.memory_loaded ? "ready" : ""}>MEM</span>
             </div>
-            <button className="secondary-button refresh-button" onClick={refreshStatus} type="button">
+            <button
+              className={`secondary-button refresh-button ${isSyncing ? "syncing" : ""}`}
+              disabled={isSyncing}
+              onClick={handleSyncWorkspace}
+              type="button"
+            >
               <span aria-hidden="true">↻</span>
-              Refresh
+              {isSyncing ? "Syncing..." : "Sync now"}
             </button>
+            {lastSyncedAt && (
+              <small className="last-synced">Synced {formatSyncTime(lastSyncedAt)}</small>
+            )}
           </div>
         </header>
 
@@ -461,10 +565,25 @@ function App() {
               <button onClick={() => setIncomingNotice(null)} type="button">关闭</button>
             </div>
           )}
+          {syncNotice && (
+            <div className="sync-banner" role="status">
+              <span>{syncNotice}</span>
+              <button onClick={() => setSyncNotice(null)} type="button">关闭</button>
+            </div>
+          )}
 
           {activeTab === "chat" && (
             <section className="chat-tab-layout">
-              <ChatPanel messages={messages} isSending={isSending} pendingText={chatPendingText} onSend={handleSend} />
+              <ChatPanel
+                messages={messages}
+                isSending={isSending}
+                pendingText={chatPendingText}
+                onSend={handleSend}
+                memoryProposal={memoryProposal}
+                isMemoryBusy={isMemoryBusy || isSending}
+                onConfirmMemory={handleConfirmMemory}
+                onRejectMemory={handleRejectMemory}
+              />
             </section>
           )}
 
@@ -789,6 +908,18 @@ function firstTransactionFee(transaction?: Record<string, unknown>) {
 
 function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function formatSyncTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "just now";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
 }
 
 export default App;

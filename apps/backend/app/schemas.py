@@ -20,6 +20,7 @@ class ChatResponse(BaseModel):
     llm_used: bool
     caw_used: bool
     memory_updated: bool
+    memory_proposal: dict[str, Any] | None = None
     proposal: dict[str, Any] | None
     wallet: dict[str, Any] | None = None
     audit_logs: list[dict[str, Any]]
@@ -58,6 +59,10 @@ class TreasuryTransferRequest(BaseModel):
 
 class PactApprovalRequest(BaseModel):
     pact_id: str
+
+
+class MemoryProposalRequest(BaseModel):
+    proposal_id: str
 
 
 class AavePactRequest(BaseModel):

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas import (
@@ -12,6 +12,7 @@ from app.schemas import (
     CawActionResponse,
     ChatRequest,
     ChatResponse,
+    MemoryProposalRequest,
     PactApprovalRequest,
     PactProposalRequest,
     StatusResponse,
@@ -27,7 +28,12 @@ from app.services.aave_service import (
 from app.services.agent_service import handle_user_message
 from app.services.caw_service import get_audit_logs, get_wallet_status, is_caw_configured, submit_transfer_pact, transfer_tokens_with_pact
 from app.services.llm_service import is_llm_configured
-from app.services.memory_service import is_memory_loaded, load_profile
+from app.services.memory_service import (
+    confirm_profile_proposal,
+    is_memory_loaded,
+    load_profile,
+    reject_profile_proposal,
+)
 from app.services.treasury_service import (
     approve_local_pact,
     execute_ready_pending_transfer,
@@ -39,6 +45,7 @@ from app.services.treasury_service import (
     send_asset,
     submit_internal_rebalance_pact,
     sync_treasury,
+    sync_workspace,
 )
 
 
@@ -81,6 +88,37 @@ async def status() -> StatusResponse:
 @app.get("/api/profile")
 async def profile() -> dict:
     return load_profile()
+
+
+@app.post("/api/profile/proposals/confirm", response_model=CawActionResponse)
+async def confirm_memory_proposal(request: MemoryProposalRequest) -> CawActionResponse:
+    try:
+        proposal = confirm_profile_proposal(request.proposal_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    workspace = await sync_workspace()
+    return CawActionResponse(
+        status="applied",
+        message="Liquidity profile applied and recommendation recalculated",
+        data={
+            "proposal": proposal,
+            "profile": load_profile(),
+            "treasury": workspace["treasury"],
+        },
+    )
+
+
+@app.post("/api/profile/proposals/reject", response_model=CawActionResponse)
+async def reject_memory_proposal(request: MemoryProposalRequest) -> CawActionResponse:
+    try:
+        proposal = reject_profile_proposal(request.proposal_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return CawActionResponse(
+        status="rejected",
+        message="Liquidity profile proposal rejected",
+        data={"proposal": proposal, "profile": load_profile()},
+    )
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -155,6 +193,23 @@ async def treasury_rebalance_preview() -> CawActionResponse:
 async def treasury_sync() -> CawActionResponse:
     result = await sync_treasury()
     return CawActionResponse(status=str(result.get("status", "synced")), message="Treasury balances synced", data=result)
+
+
+@app.post("/api/workspace/sync", response_model=CawActionResponse)
+async def workspace_sync() -> CawActionResponse:
+    result = await sync_workspace()
+    result["system_status"] = {
+        "backend": "ok",
+        "agent": "ok",
+        "caw_configured": is_caw_configured(),
+        "llm_configured": is_llm_configured(),
+        "memory_loaded": is_memory_loaded(),
+    }
+    return CawActionResponse(
+        status=str(result.get("status", "synced")),
+        message="Workspace state synchronized",
+        data=result,
+    )
 
 
 @app.post("/api/treasury/transfers", response_model=CawActionResponse)

@@ -6,6 +6,90 @@ from typing import Any
 
 ASSET_QUANTUM = Decimal("0.00000001")
 
+RISK_STRATEGY_OVERRIDES: dict[str, dict[str, Any]] = {
+    "conservative": {
+        "min_liquidity_ratio": "0.15",
+        "risk_multiplier": "1.50",
+        "single_tx_multiplier": "2.00",
+    },
+    "balanced": {},
+    "aggressive": {
+        "min_liquidity_ratio": "0.07",
+        "risk_multiplier": "1.00",
+        "single_tx_multiplier": "1.20",
+    },
+}
+
+SYSTEM_SAFETY_FLOORS = {
+    "min_liquidity_ratio": Decimal("0.05"),
+    "risk_multiplier": Decimal("1.00"),
+    "single_tx_multiplier": Decimal("1.00"),
+}
+
+
+def build_effective_strategy(
+    base_strategy: dict[str, Any],
+    profile: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    effective = dict(base_strategy)
+    impacts: list[dict[str, Any]] = []
+    preferences = (profile or {}).get("user_preferences", {})
+    habits = (profile or {}).get("transaction_habits", {})
+    risk_level = str(preferences.get("risk_level") or "balanced").lower()
+
+    for field, value in RISK_STRATEGY_OVERRIDES.get(risk_level, {}).items():
+        before = effective.get(field)
+        floor = SYSTEM_SAFETY_FLOORS.get(field)
+        adjusted = max(decimal(value), floor) if floor is not None else decimal(value)
+        effective[field] = fmt(adjusted) if field == "min_liquidity_ratio" else str(adjusted)
+        if str(before) != str(effective[field]):
+            impacts.append(
+                {
+                    "profile_field": "risk_level",
+                    "strategy_field": field,
+                    "before": before,
+                    "after": effective[field],
+                }
+            )
+
+    horizon = preferences.get("liquidity_horizon_days")
+    if horizon is not None:
+        before = effective.get("liquidity_horizon_days")
+        effective["liquidity_horizon_days"] = max(1, min(90, int(horizon)))
+        if before != effective["liquidity_horizon_days"]:
+            impacts.append(
+                {
+                    "profile_field": "liquidity_horizon_days",
+                    "strategy_field": "liquidity_horizon_days",
+                    "before": before,
+                    "after": effective["liquidity_horizon_days"],
+                }
+            )
+
+    if habits.get("prefers_low_gas"):
+        low_gas_overrides = {
+            "gas_safety_multiplier": max(
+                decimal(effective.get("gas_safety_multiplier", "1")), Decimal("1.50")
+            ),
+            "min_rebalance_amount": max(
+                asset_amount(effective.get("min_rebalance_amount", "0")), Decimal("0.01")
+            ),
+        }
+        for field, value in low_gas_overrides.items():
+            before = effective.get(field)
+            effective[field] = fmt(value)
+            if str(before) != str(effective[field]):
+                impacts.append(
+                    {
+                        "profile_field": "prefers_low_gas",
+                        "strategy_field": field,
+                        "before": before,
+                        "after": effective[field],
+                    }
+                )
+
+    return effective, impacts
+
 
 def calculate_liquidity_target(
     *,

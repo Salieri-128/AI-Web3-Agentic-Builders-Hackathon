@@ -1,4 +1,6 @@
 import { FormEvent, useState } from "react";
+import { MemoryProposal } from "../api";
+import { MemoryProposalCard } from "./MemoryProposalCard";
 
 export type ChatTurn = {
   role: "user" | "agent";
@@ -13,9 +15,22 @@ type ChatPanelProps = {
   isSending: boolean;
   pendingText?: string;
   onSend: (message: string) => Promise<void>;
+  memoryProposal?: MemoryProposal | null;
+  isMemoryBusy?: boolean;
+  onConfirmMemory: (proposalId: string) => Promise<void>;
+  onRejectMemory: (proposalId: string) => Promise<void>;
 };
 
-export function ChatPanel({ messages, isSending, pendingText, onSend }: ChatPanelProps) {
+export function ChatPanel({
+  messages,
+  isSending,
+  pendingText,
+  onSend,
+  memoryProposal,
+  isMemoryBusy = false,
+  onConfirmMemory,
+  onRejectMemory,
+}: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const quickPrompts = [
     "分析我的资金并给出流动性建议",
@@ -57,6 +72,14 @@ export function ChatPanel({ messages, isSending, pendingText, onSend }: ChatPane
                 </div>
                 <p>{pendingText || "正在处理请求..."}</p>
               </article>
+            )}
+            {memoryProposal && (
+              <MemoryProposalCard
+                proposal={memoryProposal}
+                isBusy={isMemoryBusy}
+                onConfirm={onConfirmMemory}
+                onReject={onRejectMemory}
+              />
             )}
           </>
         ) : (

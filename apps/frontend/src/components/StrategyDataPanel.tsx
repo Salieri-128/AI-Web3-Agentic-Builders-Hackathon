@@ -9,6 +9,7 @@ type DataRow = {
   label: string;
   value: string;
   note: string;
+  source?: string;
 };
 
 export function StrategyDataPanel({ profile, treasury }: StrategyDataPanelProps) {
@@ -79,7 +80,10 @@ function DataCard({ title, rows, emptyText }: { title: string; rows: DataRow[]; 
           {rows.map((row) => (
             <div key={row.label}>
               <dt>
-                <span>{row.label}</span>
+                <span>
+                  {row.label}
+                  {row.source && <b className={`data-source source-${row.source.toLowerCase().replace(/\s+/g, "-")}`}>{row.source}</b>}
+                </span>
                 <small>{row.note}</small>
               </dt>
               <dd>{row.value}</dd>
@@ -107,6 +111,7 @@ function buildCandidateRows(treasury: TreasuryState | null): DataRow[] {
     label: labels[key]?.label ?? key,
     value: `${value} ${treasury?.asset ?? ""}`.trim(),
     note: labels[key]?.note ?? "参与 max 计算的候选值",
+    source: treasury?.candidate_sources?.[key] ?? "SYSTEM",
   }));
 }
 
@@ -116,28 +121,27 @@ function buildMemoryRows(profile: Profile | null): DataRow[] {
   return [
     {
       label: "风险偏好",
-      value: preferences?.risk_level ?? "未设置",
-      note: "影响策略解释和后续风控倾向",
+      value: preferences?.risk_level ?? "balanced",
+      note: "映射最低比例、风险系数和单笔缓冲",
+      source: "PROFILE",
     },
     {
-      label: "偏好资产",
-      value: formatList(preferences?.preferred_assets),
-      note: "Agent 推荐时优先考虑",
+      label: "最低保留",
+      value: preferences?.liquidity_floor ? `${preferences.liquidity_floor} WBTC` : "使用系统下限",
+      note: "用户要求钱包必须保留的绝对金额",
+      source: "PROFILE",
     },
     {
-      label: "拒绝资产",
-      value: formatList(preferences?.blocked_assets),
-      note: "Agent 应避免推荐",
-    },
-    {
-      label: "用户确认",
-      value: habits?.requires_confirmation_before_execution === false ? "可在授权内执行" : "执行前需要确认",
-      note: "不等于资金授权，最终仍受 Pact 约束",
+      label: "覆盖天数",
+      value: preferences?.liquidity_horizon_days ? `${preferences.liquidity_horizon_days} 天` : "使用系统周期",
+      note: "历史日均流出需要覆盖的未来天数",
+      source: "PROFILE",
     },
     {
       label: "低 Gas 偏好",
       value: habits?.prefers_low_gas ? "是" : "否 / 未设置",
-      note: "影响再平衡频率倾向",
+      note: "提高最小调仓金额，减少低价值调仓",
+      source: "PROFILE",
     },
   ];
 }
@@ -172,7 +176,8 @@ function buildTransferRows(treasury: TreasuryState | null, asset: string): DataR
 }
 
 function buildStrategyRows(treasury: TreasuryState | null, asset: string): DataRow[] {
-  const strategy = treasury?.strategy ?? {};
+  const strategy = treasury?.effective_strategy ?? treasury?.strategy ?? {};
+  const baseStrategy = treasury?.base_strategy ?? {};
   const rows: Array<[string, string, string]> = [
     ["base_buffer", "基础缓冲", "最低保留资金"],
     ["liquidity_horizon_days", "流动性周期", "希望钱包覆盖的未来转账天数"],
@@ -189,8 +194,15 @@ function buildStrategyRows(treasury: TreasuryState | null, asset: string): DataR
     .filter(([key]) => strategy[key] !== undefined)
     .map(([key, label, note]) => ({
       label,
-      value: String(strategy[key]),
-      note,
+      value:
+        baseStrategy[key] !== undefined && String(baseStrategy[key]) !== String(strategy[key])
+          ? `${String(strategy[key])}（基础 ${String(baseStrategy[key])}）`
+          : String(strategy[key]),
+      note: key === "base_buffer" ? `${note}，单位 ${asset}` : note,
+      source:
+        baseStrategy[key] !== undefined && String(baseStrategy[key]) !== String(strategy[key])
+          ? "PROFILE"
+          : "SYSTEM",
     }));
 }
 
@@ -201,8 +213,4 @@ function getRatioLabel(part: string, total: string) {
     return "0%";
   }
   return `${((partAmount / totalAmount) * 100).toFixed(0)}%`;
-}
-
-function formatList(value?: string[]) {
-  return value?.length ? value.join(", ") : "未设置";
 }

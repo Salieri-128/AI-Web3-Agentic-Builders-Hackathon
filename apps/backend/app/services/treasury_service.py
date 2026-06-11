@@ -32,6 +32,7 @@ from app.services.caw_service import (
 from app.services.memory_service import load_profile
 from app.services.treasury_policy import (
     asset_amount,
+    build_effective_strategy,
     calculate_liquidity_target,
     calculate_rebalance_economics,
     fmt,
@@ -126,7 +127,11 @@ def _compose_treasury_state(
         "chain_id": state["chain_id"],
         "balances": balances,
         "liquidity": liquidity,
-        "strategy": state["strategy"],
+        "strategy": liquidity["effective_strategy"],
+        "base_strategy": state["strategy"],
+        "effective_strategy": liquidity["effective_strategy"],
+        "profile_impacts": liquidity["profile_impacts"],
+        "candidate_sources": liquidity["candidate_sources"],
         "transfer_stats_7d": stats,
         "recommendation": recommendation,
         "rebalance_preview": state.get("last_rebalance_preview"),
@@ -139,15 +144,23 @@ def _compose_treasury_state(
     }
 
 
-async def preview_rebalance() -> dict[str, Any]:
+async def preview_rebalance(*, record_event: bool = True) -> dict[str, Any]:
     state = await refresh_pact_statuses(_load_state())
     aave_state, wallet_status = await asyncio.gather(get_aave_wallet_state(), get_wallet_status())
     balances = _extract_real_balances(aave_state, wallet_status)
     stats = get_transfer_stats()
+    profile = load_profile()
+    effective_strategy, profile_impacts = build_effective_strategy(state["strategy"], profile)
     wallet = asset_amount(balances["wallet_available"])
     aave = asset_amount(balances["aave_withdrawable"])
     total = asset_amount(balances["total"])
-    sample_amount = fmt(max(asset_amount(state["strategy"]["min_rebalance_amount"]), total, Decimal("0.00000001")))
+    sample_amount = fmt(
+        max(
+            asset_amount(effective_strategy["min_rebalance_amount"]),
+            total,
+            Decimal("0.00000001"),
+        )
+    )
     active_pact_id = _find_known_internal_caw_pact_id(state, asset_amount(sample_amount))
     fee_estimates, prices = await asyncio.gather(
         estimate_aave_fees(amount=sample_amount, pact_id=active_pact_id),
@@ -159,6 +172,9 @@ async def preview_rebalance() -> dict[str, Any]:
         stats,
         balances,
         estimated_withdraw_gas_asset=converted["amounts_wbtc"].get("withdraw", "0"),
+        profile=profile,
+        effective_strategy=effective_strategy,
+        profile_impacts=profile_impacts,
     )
     target = asset_amount(liquidity["target"])
 
@@ -193,7 +209,7 @@ async def preview_rebalance() -> dict[str, Any]:
             wallet_available=wallet,
             liquidity_target=target,
             stats=stats,
-            strategy=state["strategy"],
+            strategy=effective_strategy,
             approve_gas_asset=exact_converted["amounts_wbtc"].get("approve", "0"),
             supply_gas_asset=exact_converted["amounts_wbtc"].get("supply", "0"),
             withdraw_gas_asset=exact_converted["amounts_wbtc"].get("withdraw", "0"),
@@ -218,7 +234,8 @@ async def preview_rebalance() -> dict[str, Any]:
     state["last_rebalance_preview"] = preview
     state["updated_at"] = _now_iso()
     _save_state(state)
-    _append_event({"type": "rebalance_preview", "preview": _compact_preview(preview)})
+    if record_event:
+        _append_event({"type": "rebalance_preview", "preview": _compact_preview(preview)})
     return preview
 
 
@@ -293,7 +310,7 @@ async def run_daily_rebalance() -> dict[str, Any]:
 
 
 async def sync_treasury() -> dict[str, Any]:
-    state = _load_state()
+    state = await refresh_pact_statuses(_load_state())
     aave_state, wallet_status = await asyncio.gather(get_aave_wallet_state(), get_wallet_status())
     balances = _extract_real_balances(aave_state, wallet_status)
     previous = state.get("balance_snapshot") or {}
@@ -314,6 +331,27 @@ async def sync_treasury() -> dict[str, Any]:
         "status": "incoming_funds_detected" if detected else "synced",
         "incoming_amount": fmt(incoming),
         "treasury": _compose_treasury_state(state, aave_state, wallet_status),
+    }
+
+
+async def sync_workspace() -> dict[str, Any]:
+    sync_result = await sync_treasury()
+    preview = await preview_rebalance(record_event=False)
+    treasury = sync_result["treasury"]
+    treasury["liquidity"] = preview["liquidity"]
+    treasury["recommendation"] = _legacy_recommendation(preview["liquidity"])
+    treasury["rebalance_preview"] = preview
+    treasury["strategy"] = preview["liquidity"]["effective_strategy"]
+    treasury["effective_strategy"] = preview["liquidity"]["effective_strategy"]
+    treasury["profile_impacts"] = preview["liquidity"]["profile_impacts"]
+    treasury["candidate_sources"] = preview["liquidity"]["candidate_sources"]
+    return {
+        "status": sync_result["status"],
+        "synced_at": _now_iso(),
+        "incoming_amount": sync_result["incoming_amount"],
+        "profile": load_profile(),
+        "treasury": treasury,
+        "preview": preview,
     }
 
 
@@ -755,20 +793,70 @@ def _calculate_liquidity(
     balances: dict[str, str],
     *,
     estimated_withdraw_gas_asset: str = "0",
+    profile: dict[str, Any] | None = None,
+    effective_strategy: dict[str, Any] | None = None,
+    profile_impacts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    profile = load_profile()
+    profile = profile or load_profile()
+    effective_strategy, profile_impacts = (
+        (effective_strategy, profile_impacts or [])
+        if effective_strategy is not None
+        else build_effective_strategy(state["strategy"], profile)
+    )
     user_floor = profile.get("user_preferences", {}).get("liquidity_floor") or "0"
     result = calculate_liquidity_target(
         total_balance=balances["total"],
         stats=stats,
-        strategy=state["strategy"],
+        strategy=effective_strategy,
         user_floor=user_floor,
         estimated_withdraw_gas_asset=estimated_withdraw_gas_asset,
     )
     total = asset_amount(balances["total"])
     wallet = asset_amount(balances.get("wallet_available", balances.get("wallet", "0")))
     result["current_ratio"] = fmt(wallet / total if total > 0 else Decimal("0"))
+    result["effective_strategy"] = effective_strategy
+    result["profile_impacts"] = profile_impacts
+    result["candidate_sources"] = _candidate_sources(profile)
     return result
+
+
+async def preview_profile_liquidity(profile: dict[str, Any]) -> dict[str, Any]:
+    state = _load_state()
+    aave_state, wallet_status = await asyncio.gather(get_aave_wallet_state(), get_wallet_status())
+    balances = _extract_real_balances(aave_state, wallet_status)
+    stats = get_transfer_stats()
+    current = _calculate_liquidity(state, stats, balances)
+    proposed = _calculate_liquidity(state, stats, balances, profile=profile)
+    return {
+        "asset": ASSET,
+        "before": _compact_liquidity_impact(current),
+        "after": _compact_liquidity_impact(proposed),
+        "changed": current["target"] != proposed["target"]
+        or current["target_yield_balance"] != proposed["target_yield_balance"],
+    }
+
+
+def _compact_liquidity_impact(liquidity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "recommended_liquidity": liquidity["target"],
+        "target_yield_balance": liquidity["target_yield_balance"],
+        "candidates": liquidity["components"],
+        "effective_strategy": liquidity["effective_strategy"],
+    }
+
+
+def _candidate_sources(profile: dict[str, Any]) -> dict[str, str]:
+    preferences = profile.get("user_preferences", {})
+    risk_level = preferences.get("risk_level", "balanced")
+    user_floor = preferences.get("liquidity_floor")
+    horizon = preferences.get("liquidity_horizon_days")
+    return {
+        "user_floor": "PROFILE" if user_floor is not None else "SYSTEM",
+        "min_liquidity_ratio": "PROFILE" if risk_level != "balanced" else "SYSTEM",
+        "flow_horizon": "PROFILE + HISTORY" if risk_level != "balanced" or horizon else "HISTORY",
+        "p95_transfer": "PROFILE + HISTORY" if risk_level != "balanced" else "HISTORY",
+        "economic_batch": "SYSTEM",
+    }
 
 
 def _legacy_recommendation(liquidity: dict[str, Any]) -> dict[str, Any]:
