@@ -63,7 +63,7 @@ export function StrategyDataPanel({ profile, treasury }: StrategyDataPanelProps)
       <section className="strategy-data-grid">
         <DataCard title="公式候选值" rows={candidateRows} emptyText="暂无候选值数据。" />
         <DataCard title="用户画像 / Memory" rows={memoryRows} emptyText="暂无用户画像数据。" />
-        <DataCard title="7 天转账数据" rows={transferRows} emptyText="暂无转账统计数据。" />
+        <DataCard title="历史转账数据" rows={transferRows} emptyText="暂无转账统计数据。" />
         <DataCard title="策略参数" rows={strategyRows} emptyText="暂无策略参数。" />
       </section>
     </section>
@@ -96,10 +96,11 @@ function DataCard({ title, rows, emptyText }: { title: string; rows: DataRow[]; 
 function buildCandidateRows(treasury: TreasuryState | null): DataRow[] {
   const candidates = treasury?.recommendation.candidates ?? {};
   const labels: Record<string, { label: string; note: string }> = {
-    base_buffer: { label: "基础保留", note: "策略固定最低可用资金" },
+    user_floor: { label: "最低保留", note: "用户设置与策略基础缓冲的较大值" },
     min_liquidity_ratio: { label: "最低比例", note: "总资金乘以最小流动性比例" },
-    weekly_transfer_sum: { label: "周转账总额", note: "近 7 天转账总额乘以风险系数" },
-    weekly_max_single_amount: { label: "最大单笔", note: "近 7 天最大单笔乘以单笔系数" },
+    flow_horizon: { label: "流出需求", note: "日均流出乘以流动性周期和风险系数" },
+    p95_transfer: { label: "P95 单笔", note: "历史 P95 转账额乘以单笔系数" },
+    economic_batch: { label: "经济批量", note: "综合取款 Gas、转账频率和 Aave APY" },
   };
 
   return Object.entries(candidates).map(([key, value]) => ({
@@ -150,7 +151,7 @@ function buildTransferRows(treasury: TreasuryState | null, asset: string): DataR
     {
       label: "转账次数",
       value: String(stats.weekly_transfer_count),
-      note: "近 7 天外部转账次数",
+      note: "当前统计窗口内的外部转账次数",
     },
     {
       label: "转账总额",
@@ -174,13 +175,14 @@ function buildStrategyRows(treasury: TreasuryState | null, asset: string): DataR
   const strategy = treasury?.strategy ?? {};
   const rows: Array<[string, string, string]> = [
     ["base_buffer", "基础缓冲", "最低保留资金"],
+    ["liquidity_horizon_days", "流动性周期", "希望钱包覆盖的未来转账天数"],
     ["min_liquidity_ratio", "最小流动性比例", "总资金乘以该比例"],
     ["risk_multiplier", "风险系数", "放大近期转账总额"],
     ["single_tx_multiplier", "单笔系数", "放大最大单笔转账"],
     ["min_rebalance_amount", "最小调仓金额", "低于该值不触发调仓"],
     ["aave_apy", "Aave APY", "用于估算收益是否覆盖 Gas"],
-    ["gas_fee_asset", "Gas 成本估算", `以 ${asset} 计价`],
-    ["rebalance_horizon_days", "收益周期", "用于估算短期收益"],
+    ["max_holding_days", "最长持有期", "收益评估采用的持有时间上限"],
+    ["transfer_history_days", "统计窗口", "用于计算转账流出习惯"],
   ];
 
   return rows

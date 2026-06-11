@@ -34,9 +34,11 @@ from app.services.treasury_service import (
     get_pending_transfer_status,
     get_treasury_state,
     initialize_wallet,
+    preview_rebalance,
     run_daily_rebalance,
     send_asset,
     submit_internal_rebalance_pact,
+    sync_treasury,
 )
 
 
@@ -141,6 +143,18 @@ async def treasury_initialize(request: TreasuryInitializeRequest) -> CawActionRe
 async def treasury_rebalance() -> CawActionResponse:
     result = await run_daily_rebalance()
     return CawActionResponse(status=str(result.get("status", "ok")), message="Daily rebalance completed", data=result)
+
+
+@app.post("/api/treasury/rebalance/preview", response_model=CawActionResponse)
+async def treasury_rebalance_preview() -> CawActionResponse:
+    result = await preview_rebalance()
+    return CawActionResponse(status=str(result.get("action", "hold")), message="Rebalance preview loaded", data=result)
+
+
+@app.post("/api/treasury/sync", response_model=CawActionResponse)
+async def treasury_sync() -> CawActionResponse:
+    result = await sync_treasury()
+    return CawActionResponse(status=str(result.get("status", "synced")), message="Treasury balances synced", data=result)
 
 
 @app.post("/api/treasury/transfers", response_model=CawActionResponse)

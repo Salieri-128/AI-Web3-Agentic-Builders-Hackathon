@@ -1,6 +1,14 @@
 import { TreasuryState } from "../api";
 
-type StrategyPhase = "idle" | "submitting_pact" | "waiting_pact" | "executing" | "canceling" | "completed";
+type StrategyPhase =
+  | "idle"
+  | "submitting_pact"
+  | "waiting_pact"
+  | "executing"
+  | "cancel_submitting_pact"
+  | "cancel_waiting_pact"
+  | "canceling"
+  | "completed";
 
 type TreasuryPanelProps = {
   treasury: TreasuryState | null;
@@ -32,8 +40,18 @@ export function TreasuryPanel({
   const isStrategyActive = strategyPhase === "completed" || hasAavePosition;
   const pactStatus = getPactStatusLabel(internalPact?.status);
   const pactNeedsRefresh = internalPact?.status === "pending_owner_approval";
-  const showPactModal = strategyPhase === "submitting_pact" || strategyPhase === "waiting_pact";
-  const showFunds = isStrategyActive || strategyPhase === "canceling";
+  const isCancelPhase = [
+    "cancel_submitting_pact",
+    "cancel_waiting_pact",
+    "canceling",
+  ].includes(strategyPhase);
+  const showPactModal =
+    strategyPhase === "submitting_pact" ||
+    strategyPhase === "waiting_pact" ||
+    isCancelPhase;
+  const showFunds = isStrategyActive || isCancelPhase;
+  const preview = treasury?.rebalance_preview;
+  const supplyBlocked = preview?.action === "hold" && preview.allowed === false;
 
   return (
     <section className="panel strategy-panel" aria-label="Strategy wallet panel">
@@ -52,12 +70,12 @@ export function TreasuryPanel({
           </p>
         </div>
         <div className="strategy-actions">
-          <button className="primary-action-button" disabled={isBusy} onClick={onExecuteStrategy} type="button">
+          <button className="primary-action-button" disabled={isBusy || supplyBlocked} onClick={onExecuteStrategy} type="button">
             {getActionButtonLabel(strategyPhase, isBusy, isStrategyActive)}
           </button>
           {isStrategyActive && (
             <button className="danger-action-button" disabled={isBusy} onClick={onCancelStrategy} type="button">
-              {strategyPhase === "canceling" ? "取回资产中..." : "取消策略"}
+              {getCancelButtonLabel(strategyPhase)}
             </button>
           )}
         </div>
@@ -80,6 +98,36 @@ export function TreasuryPanel({
               </button>
             )}
           </div>
+
+          {preview && (
+            <section className={`rebalance-preview ${preview.allowed ? "positive" : "blocked"}`} aria-label="Rebalance preview">
+              <div>
+                <span>Agent 建议</span>
+                <strong>{getPreviewAction(preview.action)}</strong>
+                <small>{preview.reason}</small>
+              </div>
+              <div>
+                <span>本次金额</span>
+                <strong>{preview.amount} {treasury.asset}</strong>
+                <small>目标流动性 {preview.liquidity.target} {treasury.asset}</small>
+              </div>
+              <div>
+                <span>预计收益</span>
+                <strong>{preview.expected_yield} {treasury.asset}</strong>
+                <small>预计持有 {preview.expected_holding_days ?? "n/a"} 天</small>
+              </div>
+              <div>
+                <span>本次预计 Gas</span>
+                <strong>{preview.required_native_gas ?? "n/a"} SETH</strong>
+                <small>钱包现有 {preview.gas_available ?? treasury.balances.gas_native ?? "0"} SETH</small>
+              </div>
+              <div>
+                <span>净收益</span>
+                <strong>{preview.net_benefit} {treasury.asset}</strong>
+                <small>已包含 Gas 安全系数</small>
+              </div>
+            </section>
+          )}
 
           {showFunds ? (
             <section className="funds-overview" aria-label="Current funds">
@@ -122,17 +170,24 @@ export function TreasuryPanel({
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="pact-approval-title">
           <div className="approval-modal">
             <span className="loading-dot" aria-hidden="true" />
-            <h2 id="pact-approval-title">{strategyPhase === "submitting_pact" ? "正在创建授权请求" : "需要你在 App 端审核"}</h2>
-            <p>
-              Agent 正在向 Cobo Wallet 提交本策略需要的 Rebalance Pact。请在 Cobo App 中确认并通过，
-              前端会自动检测授权状态，通过后继续执行 Aave 策略。
-            </p>
+            <h2 id="pact-approval-title">{getApprovalModalTitle(strategyPhase)}</h2>
+            <p>{getApprovalModalText(strategyPhase, yieldBalance, strategyAsset)}</p>
             <small>{pactStatus}</small>
           </div>
         </div>
       )}
     </section>
   );
+}
+
+function getPreviewAction(action: string) {
+  if (action === "supply_to_aave") {
+    return "存入 Aave";
+  }
+  if (action === "withdraw_from_aave") {
+    return "补充钱包流动性";
+  }
+  return "保持现状";
 }
 
 function getPactStatusLabel(status?: string) {
@@ -176,7 +231,7 @@ function getActionButtonLabel(strategyPhase: StrategyPhase, isBusy: boolean, isS
   if (strategyPhase === "executing") {
     return "策略执行中...";
   }
-  if (strategyPhase === "canceling") {
+  if (["cancel_submitting_pact", "cancel_waiting_pact", "canceling"].includes(strategyPhase)) {
     return "处理中...";
   }
   return "执行策略";
@@ -201,6 +256,12 @@ function getStrategyStatusText(
   if (strategyPhase === "completed") {
     return "策略已执行完成";
   }
+  if (strategyPhase === "cancel_submitting_pact") {
+    return "正在检查撤销策略所需的 CAW Pact";
+  }
+  if (strategyPhase === "cancel_waiting_pact") {
+    return "撤销策略需要新的 CAW Pact，请在 Cobo App 中审批";
+  }
   if (strategyPhase === "canceling") {
     return `正在从 Aave 取回 ${yieldBalance} ${asset}`;
   }
@@ -217,8 +278,57 @@ function getPreResultText(strategyPhase: StrategyPhase) {
   if (strategyPhase === "completed") {
     return "";
   }
-  if (strategyPhase === "canceling") {
+  if (["cancel_submitting_pact", "cancel_waiting_pact", "canceling"].includes(strategyPhase)) {
     return "正在从 Aave 取回资产，完成后这里会回到可执行状态。";
   }
   return "点击执行策略后，Agent 会先提出 Rebalance Pact，等待你审批后再执行 Aave supply。";
+}
+
+function getCancelButtonLabel(strategyPhase: StrategyPhase) {
+  if (strategyPhase === "cancel_submitting_pact") {
+    return "检查授权中...";
+  }
+  if (strategyPhase === "cancel_waiting_pact") {
+    return "等待授权中...";
+  }
+  if (strategyPhase === "canceling") {
+    return "取回资产中...";
+  }
+  return "取消策略";
+}
+
+function getApprovalModalTitle(strategyPhase: StrategyPhase) {
+  if (strategyPhase === "submitting_pact") {
+    return "正在创建授权请求";
+  }
+  if (strategyPhase === "waiting_pact") {
+    return "需要你在 App 端审核";
+  }
+  if (strategyPhase === "cancel_submitting_pact") {
+    return "正在检查撤销授权";
+  }
+  if (strategyPhase === "cancel_waiting_pact") {
+    return "需要你审批撤销授权";
+  }
+  if (strategyPhase === "canceling") {
+    return "正在撤销策略";
+  }
+  return "正在处理策略";
+}
+
+function getApprovalModalText(
+  strategyPhase: StrategyPhase,
+  yieldBalance: string,
+  asset: string,
+) {
+  if (strategyPhase === "cancel_submitting_pact") {
+    return "Agent 正在检查现有 CAW Rebalance Pact 是否能够覆盖本次全额取回。";
+  }
+  if (strategyPhase === "cancel_waiting_pact") {
+    return "当前没有额度足够的 CAW Rebalance Pact。Agent 已提交新的撤销授权，请在 Cobo App 中审批；通过后将自动继续取回资产。";
+  }
+  if (strategyPhase === "canceling") {
+    return `授权已就绪，Agent 正在从 Aave 取回 ${yieldBalance} ${asset}，请等待链上确认。`;
+  }
+  return "Agent 正在向 Cobo Wallet 提交本策略需要的 Rebalance Pact。请在 Cobo App 中确认并通过，前端会自动检测授权状态，通过后继续执行 Aave 策略。";
 }

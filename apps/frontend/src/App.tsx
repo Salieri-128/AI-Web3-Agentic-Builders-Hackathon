@@ -18,16 +18,26 @@ import {
   LocalPact,
   Profile,
   Proposal,
+  previewTreasuryRebalance,
   rebalanceTreasury,
   sendChat,
   StatusResponse,
   submitAavePact,
+  syncTreasury,
   TreasuryState,
   WalletStatus,
   withdrawAave,
 } from "./api";
 
-type StrategyPhase = "idle" | "submitting_pact" | "waiting_pact" | "executing" | "canceling" | "completed";
+type StrategyPhase =
+  | "idle"
+  | "submitting_pact"
+  | "waiting_pact"
+  | "executing"
+  | "cancel_submitting_pact"
+  | "cancel_waiting_pact"
+  | "canceling"
+  | "completed";
 
 function App() {
   const [activeTab, setActiveTab] = useState<"chat" | "portfolio" | "strategy" | "strategyData" | "history">("chat");
@@ -44,9 +54,30 @@ function App() {
   const [isTreasuryBusy, setIsTreasuryBusy] = useState(false);
   const [strategyPhase, setStrategyPhase] = useState<StrategyPhase>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [incomingNotice, setIncomingNotice] = useState<string | null>(null);
 
   useEffect(() => {
     refreshStatus();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "strategy") {
+      void refreshRebalancePreview();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    const syncIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        void syncIncomingFunds();
+      }
+    };
+    const intervalId = window.setInterval(syncIfVisible, 15000);
+    document.addEventListener("visibilitychange", syncIfVisible);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", syncIfVisible);
+    };
   }, []);
 
   async function refreshStatus() {
@@ -174,13 +205,53 @@ function App() {
     }
   }
 
+  async function refreshRebalancePreview() {
+    try {
+      const preview = await previewTreasuryRebalance();
+      setTreasury((current) =>
+        current
+          ? { ...current, liquidity: preview.liquidity, rebalance_preview: preview }
+          : current,
+      );
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Rebalance preview failed");
+    }
+  }
+
+  async function syncIncomingFunds() {
+    try {
+      const result = await syncTreasury();
+      const syncedTreasury = result.treasury as TreasuryState | undefined;
+      if (syncedTreasury) {
+        setTreasury(syncedTreasury);
+      }
+      const incomingAmount = Number(result.incoming_amount ?? 0);
+      if (String(result.status) === "incoming_funds_detected" && incomingAmount > 0) {
+        setIncomingNotice(`收到 ${String(result.incoming_amount)} WBTC，已更新 Rebalance 建议，不会自动存入 Aave。`);
+        await refreshRebalancePreview();
+      }
+    } catch {
+      // Background balance sync should not interrupt the active user flow.
+    }
+  }
+
   async function handleExecuteStrategy() {
     setIsTreasuryBusy(true);
     setStrategyPhase("submitting_pact");
     setError(null);
     try {
       let currentTreasury = treasury ?? (await initializeTreasury("1000"));
+      const preview = await previewTreasuryRebalance();
+      currentTreasury = {
+        ...currentTreasury,
+        liquidity: preview.liquidity,
+        rebalance_preview: preview,
+      };
       setTreasury(currentTreasury);
+      if (!preview.allowed && preview.action === "hold") {
+        setStrategyPhase("idle");
+        return;
+      }
 
       currentTreasury = await ensureActiveInternalPact(
         currentTreasury,
@@ -209,7 +280,7 @@ function App() {
 
   async function handleCancelStrategy() {
     setIsTreasuryBusy(true);
-    setStrategyPhase("canceling");
+    setStrategyPhase("cancel_submitting_pact");
     setError(null);
     try {
       let currentTreasury = treasury ?? (await fetchTreasuryState());
@@ -224,15 +295,16 @@ function App() {
         currentTreasury,
         formatPactAmount(aaveBalance),
         setTreasury,
-        () => setStrategyPhase("waiting_pact"),
+        () => setStrategyPhase("cancel_waiting_pact"),
       );
+      setStrategyPhase("canceling");
       const activePact = findInternalPact(
         currentTreasury,
-        (pact) => pact.status === "active" && Boolean(pact.caw_pact_id),
+        (pact) => isActivePactForAmount(pact, aaveBalance),
       );
       const pactId = activePact?.caw_pact_id ?? activePact?.pact_id;
       if (!pactId) {
-        throw new Error("No active CAW Pact is available for Aave withdraw.");
+        throw new Error("No active CAW Pact with sufficient allowance is available for Aave withdraw.");
       }
 
       const result = await withdrawAave(pactId, formatPactAmount(aaveBalance));
@@ -312,6 +384,12 @@ function App() {
       </nav>
 
       {error && <div className="error-banner">{error}</div>}
+      {incomingNotice && (
+        <div className="incoming-banner">
+          <span>{incomingNotice}</span>
+          <button onClick={() => setIncomingNotice(null)} type="button">关闭</button>
+        </div>
+      )}
 
       {activeTab === "chat" && (
         <section className="chat-tab-layout">
@@ -347,9 +425,34 @@ async function ensureActiveInternalPact(
   onState: (treasuryState: TreasuryState) => void,
   onWaitingForApproval: () => void,
 ): Promise<TreasuryState> {
-  const activePact = findInternalPact(treasury, (pact) => pact.status === "active" && Boolean(pact.caw_pact_id));
+  const requiredAmount = Number(maxAmount);
+  let currentTreasury = treasury;
+  const activePact = findInternalPact(currentTreasury, (pact) =>
+    isActivePactForAmount(pact, requiredAmount),
+  );
   if (activePact) {
-    return treasury;
+    await approveTreasuryPact(activePact.pact_id);
+    currentTreasury = await fetchTreasuryState();
+    onState(currentTreasury);
+    if (
+      findInternalPact(currentTreasury, (pact) =>
+        isActivePactForAmount(pact, requiredAmount),
+      )
+    ) {
+      return currentTreasury;
+    }
+  }
+
+  const existingPendingPact = findInternalPact(
+    currentTreasury,
+    (pact) =>
+      isPendingPact(pact) &&
+      Boolean(pact.caw_pact_id) &&
+      getPactMaxAmount(pact) >= requiredAmount,
+  );
+  if (existingPendingPact) {
+    onWaitingForApproval();
+    return waitForPactActive(existingPendingPact.pact_id, onState);
   }
 
   const pendingPact = (await submitAavePact(maxAmount)) as LocalPact;
@@ -357,7 +460,7 @@ async function ensureActiveInternalPact(
     const reason = pendingPact.reason || "CAW did not return a Pact ID for approval.";
     throw new Error(reason);
   }
-  const currentTreasury = await fetchTreasuryState();
+  currentTreasury = await fetchTreasuryState();
   onState(currentTreasury);
   onWaitingForApproval();
   return waitForPactActive(pendingPact.pact_id, onState);
@@ -391,8 +494,25 @@ function findInternalPact(treasury: TreasuryState, predicate: (pact: LocalPact) 
   return treasury.pacts.find((pact) => pact.pact_type === "internal_agent_rebalance" && predicate(pact));
 }
 
+function isActivePactForAmount(pact: LocalPact, requiredAmount: number) {
+  return (
+    pact.status === "active" &&
+    Boolean(pact.caw_pact_id) &&
+    getPactMaxAmount(pact) >= requiredAmount
+  );
+}
+
+function isPendingPact(pact: LocalPact) {
+  return ["pending", "pending_approval", "pending_owner_approval"].includes(pact.status);
+}
+
+function getPactMaxAmount(pact: LocalPact) {
+  const maxAmount = Number(pact.scope.max_amount ?? 0);
+  return Number.isFinite(maxAmount) ? maxAmount : 0;
+}
+
 function getStrategyPactAmount(treasury: TreasuryState) {
-  const wallet = Number(treasury.balances.wallet);
+  const wallet = Number(treasury.balances.wallet_available ?? treasury.balances.wallet);
   const total = Number(treasury.balances.total);
   const amount = Math.max(wallet, total, 1);
   return Number.isFinite(amount) ? formatPactAmount(amount) : "1";
@@ -417,7 +537,16 @@ function assertRebalanceSucceeded(result: Record<string, unknown>) {
 
 function assertAaveActionSucceeded(result: Record<string, unknown>, fallbackReason: string) {
   const status = String(result.status ?? "");
-  if (["error", "pact_not_active", "approve_failed", "execution_failed", "missing_wallet_address"].includes(status)) {
+  if (
+    [
+      "error",
+      "pact_not_active",
+      "approve_failed",
+      "withdraw_failed",
+      "execution_failed",
+      "missing_wallet_address",
+    ].includes(status)
+  ) {
     const reason = String(result.reason ?? fallbackReason);
     throw new Error(reason);
   }
@@ -445,7 +574,13 @@ function looksLikeTransferRequest(message: string) {
 function isWaitingForTransferApproval(response: ChatResponse) {
   const proposal = response.proposal as Record<string, unknown> | null;
   const pendingExecution = proposal?.pending_execution as { status?: string } | undefined;
-  return proposal?.pact_type === "external_transfer" && pendingExecution?.status === "pending_owner_approval";
+  const responseWallet = response.wallet as (WalletStatus & { treasury?: TreasuryState }) | null;
+  const pendingStage = responseWallet?.treasury?.pending_transfer?.stage;
+  return (
+    (proposal?.pact_type === "external_transfer" && pendingExecution?.status === "waiting_transfer_pact") ||
+    pendingExecution?.status === "pending_owner_approval" ||
+    ["waiting_transfer_pact", "waiting_aave_pact", "checking_balance", "estimating_gas"].includes(pendingStage ?? "")
+  );
 }
 
 async function waitForPendingTransferExecution(onProgress: (content: string) => void): Promise<Record<string, unknown>> {
@@ -460,10 +595,40 @@ async function waitForPendingTransferExecution(onProgress: (content: string) => 
       }
       const result = await executePendingTransfer();
       const executionStatus = String(result.status ?? "");
-      if (["completed", "execution_failed", "blocked_legacy_pact"].includes(executionStatus)) {
+      if (executionStatus === "pact_required" || executionStatus === "pending_owner_approval") {
+        onProgress("当前没有额度足够的目标地址转账 Pact，已提交新 Pact，请在 Cobo App 中审批...");
+      } else if (executionStatus === "waiting_aave_pact") {
+        const pending = result.pending_transfer as { withdraw_amount?: string } | undefined;
+        onProgress(
+          `已计算需从 Aave 取回 ${pending?.withdraw_amount ?? "足够的"} WBTC，正在等待 Aave Pact 审批...`,
+        );
+      }
+      if (
+        [
+          "completed",
+          "execution_failed",
+          "blocked_legacy_pact",
+          "fee_estimation_failed",
+          "insufficient_gas_balance",
+          "withdraw_failed",
+          "transfer_failed",
+        ].includes(executionStatus)
+      ) {
         return result;
       }
-    } else if (["approval_stopped", "blocked_legacy_pact", "execution_failed"].includes(status)) {
+    } else if (status === "waiting_aave_pact") {
+      onProgress("转账 Pact 已通过，正在等待 Aave 取款 Pact 审批...");
+    } else if (
+      [
+        "approval_stopped",
+        "blocked_legacy_pact",
+        "execution_failed",
+        "fee_estimation_failed",
+        "insufficient_gas_balance",
+        "withdraw_failed",
+        "transfer_failed",
+      ].includes(status)
+    ) {
       return pendingStatus;
     } else if (status === "no_pending_transfer") {
       return { status, reason: "没有找到等待中的转账 Pact。请重新发起转账请求。" };

@@ -12,6 +12,7 @@ PROFILE_PATH = ROOT_DIR / "data" / "users" / "profile.json"
 DEFAULT_PROFILE: dict[str, Any] = {
     "user_preferences": {
         "cash_buffer_usdc": None,
+        "liquidity_floor": None,
         "risk_level": "conservative",
         "preferred_assets": [],
         "blocked_assets": [],
