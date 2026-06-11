@@ -17,6 +17,11 @@ type ChatPanelProps = {
 
 export function ChatPanel({ messages, isSending, pendingText, onSend }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
+  const quickPrompts = [
+    "分析我的资金并给出流动性建议",
+    "解释当前 Aave 策略和风险",
+    "查看我最近的资金管理偏好",
+  ];
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -55,19 +60,44 @@ export function ChatPanel({ messages, isSending, pendingText, onSend }: ChatPane
             )}
           </>
         ) : (
-          <div className="chat-empty-state" />
+          <div className="chat-empty-state">
+            <div className="agent-signal" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <span className="empty-eyebrow">CAW secured agent</span>
+            <h2>What should your treasury do next?</h2>
+            <p>
+              Describe a goal in plain language. The agent can analyze and propose actions, while every execution remains
+              constrained by an owner-approved Pact.
+            </p>
+            <div className="quick-prompts" aria-label="Suggested prompts">
+              {quickPrompts.map((prompt, index) => (
+                <button disabled={isSending} key={prompt} onClick={() => void onSend(prompt)} type="button">
+                  <span>0{index + 1}</span>
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
       </div>
 
       <form className="chat-form" onSubmit={submit}>
-        <input
-          aria-label="Message"
-          placeholder="Ask the treasury agent..."
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-        />
+        <div className="chat-input-wrap">
+          <span className="command-prefix" aria-hidden="true">&gt;_</span>
+          <input
+            aria-label="Message"
+            placeholder="Ask the treasury agent..."
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <small>Pact approval is always required outside the current authorization.</small>
+        </div>
         <button disabled={isSending} type="submit">
-          {isSending ? "Sending" : "Send"}
+          <span>{isSending ? "Working" : "Run command"}</span>
+          <b aria-hidden="true">↗</b>
         </button>
       </form>
     </section>

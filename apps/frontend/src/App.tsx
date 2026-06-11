@@ -39,8 +39,54 @@ type StrategyPhase =
   | "canceling"
   | "completed";
 
+type AppTab = "chat" | "portfolio" | "strategy" | "strategyData" | "history";
+
+const TAB_META: Array<{
+  id: AppTab;
+  index: string;
+  label: string;
+  title: string;
+  description: string;
+}> = [
+  {
+    id: "chat",
+    index: "01",
+    label: "Agent",
+    title: "Treasury command center",
+    description: "Talk to the agent, review its reasoning, and keep every money movement inside an approved Pact.",
+  },
+  {
+    id: "portfolio",
+    index: "02",
+    label: "Portfolio",
+    title: "Asset overview",
+    description: "Inspect wallet and Aave positions across the demo environment without exposing execution credentials.",
+  },
+  {
+    id: "strategy",
+    index: "03",
+    label: "Strategy",
+    title: "Liquidity strategy",
+    description: "Preview the proposed rebalance, approve its permission boundary, and follow execution status.",
+  },
+  {
+    id: "strategyData",
+    index: "04",
+    label: "Policy data",
+    title: "Decision inputs",
+    description: "See the profile, transfer history, and deterministic policy values behind the recommendation.",
+  },
+  {
+    id: "history",
+    index: "05",
+    label: "Audit trail",
+    title: "Execution history",
+    description: "Review prior requests and the full structured result returned by the agent.",
+  },
+];
+
 function App() {
-  const [activeTab, setActiveTab] = useState<"chat" | "portfolio" | "strategy" | "strategyData" | "history">("chat");
+  const [activeTab, setActiveTab] = useState<AppTab>("chat");
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [proposal, setProposal] = useState<Proposal | null>(null);
@@ -337,84 +383,111 @@ function App() {
     }
   }
 
+  const activeTabMeta = TAB_META.find((tab) => tab.id === activeTab) ?? TAB_META[0];
+  const servicesOnline = status?.backend === "ok" || status?.backend === "ready";
+
   return (
     <main className="app-shell">
-      <header className="app-header">
-        <div>
-          <h1>Agentic Treasury Demo</h1>
-          <p>Powered by Cobo Agentic Wallet</p>
+      <a className="skip-link" href="#workspace-content">Skip to workspace</a>
+
+      <aside className="app-sidebar">
+        <div className="brand-lockup">
+          <div className="brand-mark" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div>
+            <strong>CAW / TREASURY</strong>
+            <small>Agentic control plane</small>
+          </div>
         </div>
-        <button className="secondary-button" onClick={refreshStatus}>
-          Refresh Status
-        </button>
-      </header>
 
-      <nav className="tab-bar" aria-label="Primary navigation">
-        <button className={activeTab === "chat" ? "active" : ""} onClick={() => setActiveTab("chat")} type="button">
-          Chat
-        </button>
-        <button
-          className={activeTab === "portfolio" ? "active" : ""}
-          onClick={() => setActiveTab("portfolio")}
-          type="button"
-        >
-          Portfolio
-        </button>
-        <button
-          className={activeTab === "strategy" ? "active" : ""}
-          onClick={() => setActiveTab("strategy")}
-          type="button"
-        >
-          Strategy
-        </button>
-        <button
-          className={activeTab === "strategyData" ? "active" : ""}
-          onClick={() => setActiveTab("strategyData")}
-          type="button"
-        >
-          Strategy Data
-        </button>
-        <button
-          className={activeTab === "history" ? "active" : ""}
-          onClick={() => setActiveTab("history")}
-          type="button"
-        >
-          History
-        </button>
-      </nav>
+        <nav className="tab-bar" aria-label="Primary navigation">
+          {TAB_META.map((tab) => (
+            <button
+              aria-current={activeTab === tab.id ? "page" : undefined}
+              className={activeTab === tab.id ? "active" : ""}
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              type="button"
+            >
+              <span>{tab.index}</span>
+              <strong>{tab.label}</strong>
+            </button>
+          ))}
+        </nav>
 
-      {error && <div className="error-banner">{error}</div>}
-      {incomingNotice && (
-        <div className="incoming-banner">
-          <span>{incomingNotice}</span>
-          <button onClick={() => setIncomingNotice(null)} type="button">关闭</button>
+        <div className="sidebar-boundary">
+          <span className="boundary-label">Permission boundary</span>
+          <strong>Pact enforced</strong>
+          <p>Agent proposes. Owner approves. CAW executes.</p>
         </div>
-      )}
 
-      {activeTab === "chat" && (
-        <section className="chat-tab-layout">
-          <ChatPanel messages={messages} isSending={isSending} pendingText={chatPendingText} onSend={handleSend} />
+        <div className="sidebar-foot">
+          <span className={`status-dot ${servicesOnline ? "online" : ""}`} aria-hidden="true" />
+          <div>
+            <strong>{servicesOnline ? "Systems nominal" : "Checking systems"}</strong>
+            <small>{treasury?.mode?.includes("sepolia_real") ? "Sepolia environment" : "Local demo environment"}</small>
+          </div>
+        </div>
+      </aside>
+
+      <section className="app-workspace">
+        <header className="app-header">
+          <div className="page-heading">
+            <span className="page-index">Workspace / {activeTabMeta.index}</span>
+            <h1>{activeTabMeta.title}</h1>
+            <p>{activeTabMeta.description}</p>
+          </div>
+          <div className="header-actions">
+            <div className="system-pills" aria-label="System configuration">
+              <span className={status?.caw_configured ? "ready" : ""}>CAW</span>
+              <span className={status?.llm_configured ? "ready" : ""}>LLM</span>
+              <span className={status?.memory_loaded ? "ready" : ""}>MEM</span>
+            </div>
+            <button className="secondary-button refresh-button" onClick={refreshStatus} type="button">
+              <span aria-hidden="true">↻</span>
+              Refresh
+            </button>
+          </div>
+        </header>
+
+        <section className="workspace-content" id="workspace-content">
+          {error && <div className="error-banner" role="alert">{error}</div>}
+          {incomingNotice && (
+            <div className="incoming-banner" role="status">
+              <span>{incomingNotice}</span>
+              <button onClick={() => setIncomingNotice(null)} type="button">关闭</button>
+            </div>
+          )}
+
+          {activeTab === "chat" && (
+            <section className="chat-tab-layout">
+              <ChatPanel messages={messages} isSending={isSending} pendingText={chatPendingText} onSend={handleSend} />
+            </section>
+          )}
+
+          {activeTab === "portfolio" && <PortfolioPanel wallet={wallet} treasury={treasury} />}
+
+          {activeTab === "strategy" && (
+            <section className="strategy-layout">
+              <TreasuryPanel
+                treasury={treasury}
+                isBusy={isTreasuryBusy}
+                strategyPhase={strategyPhase}
+                onExecuteStrategy={handleExecuteStrategy}
+                onCancelStrategy={handleCancelStrategy}
+                onApprovePact={handleApproveTreasuryPact}
+              />
+            </section>
+          )}
+
+          {activeTab === "strategyData" && <StrategyDataPanel profile={profile} treasury={treasury} />}
+
+          {activeTab === "history" && <HistoryPanel items={history} />}
         </section>
-      )}
-
-      {activeTab === "portfolio" && <PortfolioPanel wallet={wallet} treasury={treasury} />}
-
-      {activeTab === "strategy" && (
-        <section className="strategy-layout">
-          <TreasuryPanel
-            treasury={treasury}
-            isBusy={isTreasuryBusy}
-            strategyPhase={strategyPhase}
-            onExecuteStrategy={handleExecuteStrategy}
-            onCancelStrategy={handleCancelStrategy}
-            onApprovePact={handleApproveTreasuryPact}
-          />
-        </section>
-      )}
-
-      {activeTab === "strategyData" && <StrategyDataPanel profile={profile} treasury={treasury} />}
-
-      {activeTab === "history" && <HistoryPanel items={history} />}
+      </section>
     </main>
   );
 }
