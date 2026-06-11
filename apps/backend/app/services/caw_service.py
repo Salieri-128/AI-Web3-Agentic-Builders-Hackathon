@@ -151,6 +151,71 @@ async def eth_call(*, chain_id: str, to: str, data: str, from_address: str | Non
         return _service_error(error)
 
 
+async def estimate_transfer_fee(
+    *,
+    chain_id: str,
+    token_id: str,
+    destination: str,
+    amount: str,
+    src_addr: str,
+    pact_id: str | None = None,
+) -> dict[str, Any]:
+    if not is_caw_configured():
+        return {"status": "error", "reason": CAW_NOT_CONFIGURED_MESSAGE}
+    try:
+        async with _wallet_client_for_pact(pact_id) as client:
+            result = await client.estimate_transfer_fee(
+                _required_caw_wallet_id(),
+                chain_id=chain_id,
+                token_id=token_id,
+                dst_addr=destination,
+                amount=amount,
+                src_addr=src_addr,
+            )
+            return _redact_sensitive(_as_dict(result))
+    except Exception as error:
+        return _service_error(error)
+
+
+async def estimate_contract_call_fee(
+    *,
+    chain_id: str,
+    contract_addr: str,
+    calldata: str,
+    src_addr: str,
+    value: str = "0",
+    pact_id: str | None = None,
+) -> dict[str, Any]:
+    if not is_caw_configured():
+        return {"status": "error", "reason": CAW_NOT_CONFIGURED_MESSAGE}
+    try:
+        async with _wallet_client_for_pact(pact_id) as client:
+            result = await client.estimate_contract_call_fee(
+                _required_caw_wallet_id(),
+                chain_id=chain_id,
+                contract_addr=contract_addr,
+                calldata=calldata,
+                src_addr=src_addr,
+                value=value,
+            )
+            return _redact_sensitive(_as_dict(result))
+    except Exception as error:
+        return _service_error(error)
+
+
+async def get_asset_prices(asset_coins: str, currency: str = "USD") -> dict[str, Any]:
+    if not is_caw_configured():
+        return {"status": "error", "reason": CAW_NOT_CONFIGURED_MESSAGE}
+    try:
+        async with _wallet_client() as client:
+            result = await client.get_asset_coin_prices(asset_coins=asset_coins, currency=currency)
+            if isinstance(result, list):
+                return {"items": [_as_dict(item) for item in result]}
+            return _redact_sensitive(_as_dict(result))
+    except Exception as error:
+        return _service_error(error)
+
+
 async def contract_call_with_pact(
     *,
     pact_id: str,
@@ -312,6 +377,24 @@ async def _wallet_client(api_key: str | None = None) -> AsyncIterator[Any]:
             close = getattr(client, "close", None)
             if close is not None:
                 await _maybe_await(close())
+
+
+@asynccontextmanager
+async def _wallet_client_for_pact(pact_id: str | None) -> AsyncIterator[Any]:
+    if not pact_id:
+        async with _wallet_client() as client:
+            yield client
+        return
+
+    async with _wallet_client() as owner_client:
+        pact = _as_dict(await owner_client.get_pact(pact_id))
+        if pact.get("status") != "active":
+            raise RuntimeError(f"Pact status is {pact.get('status', 'unknown')}.")
+        pact_api_key = pact.get("api_key")
+        if not pact_api_key:
+            raise RuntimeError("CAW did not return a pact-scoped API key.")
+    async with _wallet_client(api_key=str(pact_api_key)) as pact_client:
+        yield pact_client
 
 
 async def _safe_items_call(client: Any, method_name: str, *args: Any, **kwargs: Any) -> list[Any]:

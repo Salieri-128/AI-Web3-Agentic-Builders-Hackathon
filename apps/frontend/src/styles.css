@@ -114,6 +114,59 @@ input {
   gap: 18px;
 }
 
+.rebalance-preview {
+  background: #f8fafc;
+  border: 1px solid #dce4ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  padding: 14px;
+}
+
+.rebalance-preview.positive {
+  border-color: #9bd3ae;
+}
+
+.rebalance-preview.blocked {
+  border-color: #f0b7b2;
+}
+
+.rebalance-preview div {
+  display: grid;
+  gap: 5px;
+}
+
+.rebalance-preview span,
+.rebalance-preview small {
+  color: #5c6b7a;
+}
+
+.rebalance-preview strong {
+  color: #17202a;
+}
+
+.incoming-banner {
+  align-items: center;
+  background: #e9f7ef;
+  border: 1px solid #9bd3ae;
+  border-radius: 8px;
+  color: #17633a;
+  display: flex;
+  justify-content: space-between;
+  margin: 0 auto 18px;
+  max-width: 1360px;
+  padding: 12px 14px;
+}
+
+.incoming-banner button {
+  background: transparent;
+  border: 0;
+  color: #17633a;
+  cursor: pointer;
+  font-weight: 800;
+}
+
 .panel-heading {
   align-items: center;
   border-bottom: 1px solid #e8edf3;
@@ -912,6 +965,7 @@ dd {
   .action-row,
   .strategy-hero,
   .strategy-actions,
+  .rebalance-preview,
   .funds-overview,
   .strategy-data-kpis,
   .history-layout {

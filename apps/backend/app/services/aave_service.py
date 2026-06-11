@@ -8,6 +8,7 @@ from typing import Any
 from app.services.caw_service import (
     contract_call_with_pact,
     eth_call,
+    estimate_contract_call_fee,
     get_transaction_by_request_id,
     get_wallet_status,
     is_caw_configured,
@@ -88,7 +89,12 @@ async def submit_aave_rebalance_pact(max_amount: str = "100") -> dict[str, Any]:
     )
 
 
-async def execute_aave_supply(pact_id: str, amount: str) -> dict[str, Any]:
+async def execute_aave_supply(
+    pact_id: str,
+    amount: str,
+    *,
+    request_ids: dict[str, str] | None = None,
+) -> dict[str, Any]:
     wallet_address = await get_caw_evm_address()
     if not wallet_address:
         return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
@@ -105,6 +111,7 @@ async def execute_aave_supply(pact_id: str, amount: str) -> dict[str, Any]:
             contract_addr=WBTC,
             src_addr=wallet_address,
             calldata=approve_calldata,
+            request_id=(request_ids or {}).get("approve"),
             description=f"Approve Aave Pool to pull {amount} {ASSET_SYMBOL}",
         )
         if approve_result.get("status") == "pact_not_active" or approve_result.get("status") == "error":
@@ -126,6 +133,7 @@ async def execute_aave_supply(pact_id: str, amount: str) -> dict[str, Any]:
         contract_addr=AAVE_POOL,
         src_addr=wallet_address,
         calldata=supply_calldata,
+        request_id=(request_ids or {}).get("supply"),
         description=f"Supply {amount} {ASSET_SYMBOL} to Aave V3 Sepolia",
     )
     final_aave_units = await _wait_for_aave_balance(wallet_address, starting_aave_units + amount_units)
@@ -141,22 +149,51 @@ async def execute_aave_supply(pact_id: str, amount: str) -> dict[str, Any]:
     }
 
 
-async def execute_aave_withdraw(pact_id: str, amount: str) -> dict[str, Any]:
+async def execute_aave_withdraw(
+    pact_id: str,
+    amount: str,
+    *,
+    request_id: str | None = None,
+) -> dict[str, Any]:
     wallet_address = await get_caw_evm_address()
     if not wallet_address:
         return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
     amount_units = _parse_units(amount, ASSET_DECIMALS)
     withdraw_calldata = encode_withdraw(WBTC, amount_units, wallet_address)
+    starting_wallet_units = await _read_erc20_balance(WBTC, wallet_address)
     withdraw_result = await contract_call_with_pact(
         pact_id=pact_id,
         chain_id=CHAIN_ID,
         contract_addr=AAVE_POOL,
         src_addr=wallet_address,
         calldata=withdraw_calldata,
+        request_id=request_id,
         description=f"Withdraw {amount} {ASSET_SYMBOL} from Aave V3 Sepolia",
     )
+    if withdraw_result.get("status") in {
+        "error",
+        "pact_not_active",
+        "missing_pact_api_key",
+    }:
+        return {
+            "status": "withdraw_failed",
+            "reason": withdraw_result.get("reason")
+            or withdraw_result.get("error")
+            or "CAW rejected the Aave withdraw request.",
+            "operation": "aave_withdraw",
+            "amount": amount,
+            "calldata": {"withdraw": withdraw_calldata},
+            "withdraw": withdraw_result,
+        }
+    final_wallet_units = await _wait_for_token_balance(
+        WBTC,
+        wallet_address,
+        starting_wallet_units + amount_units,
+    )
     return {
-        "status": str(withdraw_result.get("status", "submitted")),
+        "status": "ok" if final_wallet_units >= starting_wallet_units + amount_units else str(
+            withdraw_result.get("status", "submitted")
+        ),
         "operation": "aave_withdraw",
         "amount": amount,
         "calldata": {"withdraw": withdraw_calldata},
@@ -178,14 +215,20 @@ async def submit_wbtc_transfer_pact(*, destination: str, max_amount: str, tx_cou
     )
 
 
-async def execute_wbtc_transfer(pact_id: str, destination: str, amount: str) -> dict[str, Any]:
+async def execute_wbtc_transfer(
+    pact_id: str,
+    destination: str,
+    amount: str,
+    *,
+    request_id: str | None = None,
+) -> dict[str, Any]:
     wallet_address = await get_caw_evm_address()
     if not wallet_address:
         return {"status": "missing_wallet_address", "reason": "No EVM address returned by CAW wallet status."}
     amount_units = _parse_units(amount, ASSET_DECIMALS)
     starting_destination_units = await _read_erc20_balance(WBTC, destination)
     calldata = encode_transfer(destination, amount_units)
-    request_id = f"agentic-treasury-{uuid.uuid4()}"
+    request_id = request_id or f"agentic-treasury-{uuid.uuid4()}"
     transfer_result = await contract_call_with_pact(
         pact_id=pact_id,
         chain_id=CHAIN_ID,
@@ -209,6 +252,104 @@ async def execute_wbtc_transfer(pact_id: str, destination: str, amount: str) -> 
         "calldata": {"transfer": calldata},
         "transfer": transfer_result,
         "aave": await get_aave_wallet_state(),
+    }
+
+
+async def estimate_aave_fees(
+    *,
+    amount: str,
+    pact_id: str | None = None,
+) -> dict[str, Any]:
+    wallet_address = await get_caw_evm_address()
+    if not wallet_address:
+        return {"status": "error", "reason": "No EVM address returned by CAW wallet status."}
+    amount_units = _parse_units(amount, ASSET_DECIMALS)
+    allowance_units = await _read_erc20_allowance(WBTC, wallet_address, AAVE_POOL)
+    call_specs: dict[str, Any] = {}
+    if allowance_units < amount_units:
+        call_specs["approve"] = estimate_contract_call_fee(
+            pact_id=pact_id,
+            chain_id=CHAIN_ID,
+            contract_addr=WBTC,
+            src_addr=wallet_address,
+            calldata=encode_approve(AAVE_POOL, amount_units),
+        )
+    call_specs["supply"] = estimate_contract_call_fee(
+        pact_id=pact_id,
+        chain_id=CHAIN_ID,
+        contract_addr=AAVE_POOL,
+        src_addr=wallet_address,
+        calldata=encode_supply(WBTC, amount_units, wallet_address),
+    )
+    call_specs["withdraw"] = estimate_contract_call_fee(
+        pact_id=pact_id,
+        chain_id=CHAIN_ID,
+        contract_addr=AAVE_POOL,
+        src_addr=wallet_address,
+        calldata=encode_withdraw(WBTC, amount_units, wallet_address),
+    )
+    names = list(call_specs)
+    results = await asyncio.gather(*(call_specs[name] for name in names))
+    calls = dict(zip(names, results))
+    return {
+        "status": "ok" if all(_fee_estimate_amount(value) is not None for value in calls.values()) else "error",
+        "token_id": _first_fee_token(calls),
+        "calls": calls,
+        "amounts": {
+            name: _fee_estimate_amount(value) or "0"
+            for name, value in calls.items()
+        },
+    }
+
+
+async def estimate_wbtc_transfer_fee(
+    *,
+    destination: str,
+    amount: str,
+    pact_id: str | None = None,
+) -> dict[str, Any]:
+    wallet_address = await get_caw_evm_address()
+    if not wallet_address:
+        return {"status": "error", "reason": "No EVM address returned by CAW wallet status."}
+    amount_units = _parse_units(amount, ASSET_DECIMALS)
+    estimate = await estimate_contract_call_fee(
+        pact_id=pact_id,
+        chain_id=CHAIN_ID,
+        contract_addr=WBTC,
+        src_addr=wallet_address,
+        calldata=encode_transfer(destination, amount_units),
+    )
+    fee_amount = _fee_estimate_amount(estimate)
+    return {
+        "status": "ok" if fee_amount is not None else "error",
+        "token_id": str(estimate.get("token_id") or "SETH"),
+        "fee_amount": fee_amount or "0",
+        "estimate": estimate,
+    }
+
+
+async def estimate_aave_withdraw_fee(
+    *,
+    amount: str,
+    pact_id: str | None = None,
+) -> dict[str, Any]:
+    wallet_address = await get_caw_evm_address()
+    if not wallet_address:
+        return {"status": "error", "reason": "No EVM address returned by CAW wallet status."}
+    amount_units = _parse_units(amount, ASSET_DECIMALS)
+    estimate = await estimate_contract_call_fee(
+        pact_id=pact_id,
+        chain_id=CHAIN_ID,
+        contract_addr=AAVE_POOL,
+        src_addr=wallet_address,
+        calldata=encode_withdraw(WBTC, amount_units, wallet_address),
+    )
+    fee_amount = _fee_estimate_amount(estimate)
+    return {
+        "status": "ok" if fee_amount is not None else "error",
+        "token_id": str(estimate.get("token_id") or "SETH"),
+        "fee_amount": fee_amount or "0",
+        "estimate": estimate,
     }
 
 
@@ -526,6 +667,29 @@ def _read_nested_dict(value: dict[str, Any], path: tuple[str, ...]) -> dict[str,
             return {}
         current = current.get(key)
     return current if isinstance(current, dict) else {}
+
+
+def _fee_estimate_amount(estimate: dict[str, Any]) -> str | None:
+    recommended = estimate.get("recommended")
+    if isinstance(recommended, dict) and recommended.get("fee_amount") not in (None, ""):
+        return str(recommended["fee_amount"])
+    if isinstance(recommended, dict):
+        max_fee_per_gas = recommended.get("max_fee_per_gas")
+        gas_limit = recommended.get("gas_limit")
+        if max_fee_per_gas not in (None, "") and gas_limit not in (None, ""):
+            fee = Decimal(str(max_fee_per_gas)) * Decimal(str(gas_limit)) / Decimal("1000000000000000000")
+            return format(fee.normalize(), "f")
+    if estimate.get("fee_amount") not in (None, ""):
+        return str(estimate["fee_amount"])
+    return None
+
+
+def _first_fee_token(calls: dict[str, dict[str, Any]]) -> str:
+    for estimate in calls.values():
+        token_id = estimate.get("token_id")
+        if token_id:
+            return str(token_id)
+    return "SETH"
 
 
 def _decode_uint_result(result: dict[str, Any]) -> int:

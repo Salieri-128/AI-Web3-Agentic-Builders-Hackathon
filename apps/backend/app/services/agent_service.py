@@ -329,10 +329,12 @@ async def _run_llm_guided_transfer(*, message: str, profile: dict[str, Any], par
         tool_state={"balances": treasury_state.get("balances", {}), "asset": treasury_state.get("asset")},
     )
     decisions.append(balance_decision)
-    if balance_decision.get("decision") == "insufficient_balance":
+    total_balance = _safe_number(treasury_state.get("balances", {}).get("total"))
+    requested_amount = _safe_number(parameters.get("amount"))
+    if total_balance < requested_amount:
         return {
-            "status": "insufficient_wallet_balance",
-            "reason": balance_decision.get("reason") or "Wallet balance is lower than the requested transfer amount.",
+            "status": "insufficient_total_balance",
+            "reason": "Combined wallet and Aave balance is lower than the requested transfer amount.",
             "treasury": treasury_state,
             "llm_transfer_decisions": decisions,
         }
@@ -348,41 +350,14 @@ async def _run_llm_guided_transfer(*, message: str, profile: dict[str, Any], par
         },
     )
     decisions.append(pact_decision)
-    if pact_decision.get("decision") in {"use_existing_pact", "execute_with_pact"} and pact_decision.get("pact_id"):
-        execution = await send_asset(
-            destination=parameters["destination"],
-            amount=parameters["amount"],
-            pact_id=str(pact_decision["pact_id"]),
-            execute=True,
-        )
-        execution["llm_transfer_decisions"] = decisions
-        return execution
-
-    proposal = await create_external_transfer_pact(parameters["destination"], parameters["amount"])
-    if not proposal.get("caw_pact_id"):
-        return {
-            "status": proposal.get("status", "pact_submission_failed"),
-            "reason": proposal.get("reason", "CAW did not return a Pact ID."),
-            "proposal": proposal,
-            "treasury": await get_treasury_state(),
-            "llm_transfer_decisions": decisions,
-        }
-
-    submitted_decision = await _safe_transfer_decision(
-        message=message,
-        profile=profile,
-        parameters=parameters,
-        stage="pact_submitted",
-        tool_state={"proposal": proposal},
+    execution = await send_asset(
+        destination=parameters["destination"],
+        amount=parameters["amount"],
+        pact_id=str(pact_decision.get("pact_id") or parameters.get("pact_id") or "") or None,
+        execute=True,
     )
-    decisions.append(submitted_decision)
-    return {
-        "status": "pact_required",
-        "reason": "Submitted a real CAW transfer Pact. Approve it in Cobo/CAW before execution.",
-        "proposal": proposal,
-        "treasury": await get_treasury_state(),
-        "llm_transfer_decisions": decisions,
-    }
+    execution["llm_transfer_decisions"] = decisions
+    return execution
 
 
 async def _safe_transfer_decision(
@@ -420,7 +395,7 @@ async def _safe_transfer_decision(
 
 def _fallback_transfer_decision(stage: str, parameters: dict[str, Any], tool_state: dict[str, Any]) -> str:
     if stage == "balance_checked":
-        wallet_balance = _safe_number(tool_state.get("balances", {}).get("wallet"))
+        wallet_balance = _safe_number(tool_state.get("balances", {}).get("total"))
         amount = _safe_number(parameters.get("amount"))
         return "insufficient_balance" if wallet_balance < amount else "use_existing_pact"
     if stage == "pacts_checked":
@@ -572,7 +547,7 @@ def _transfer_result_summary(result: dict[str, Any]) -> str:
             "已为这笔转账提交新的 CAW Pact。请在 Cobo/CAW App 中 approve，"
             "Agent 会在检测到授权生效后继续执行转账。"
         )
-    if status in {"ok", "success", "submitted"} or result.get("transaction_id") or result.get("uuid"):
+    if status in {"ok", "success", "submitted", "completed"} or result.get("transaction_id") or result.get("uuid"):
         gas_text = _extract_gas_fee_text(result)
         if result.get("auto_executed_after_approval"):
             return f"Pact 已审批通过，Agent 已继续执行转账，结果已写入审计日志。Gas fee：{gas_text}。"

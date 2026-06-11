@@ -247,3 +247,24 @@
 - 修改：apps/backend/app/services/agent_service.py, apps/backend/app/services/aave_service.py, apps/frontend/src/App.tsx
 - 意图：新 Pact 提交后立即返回给前端监听，避免长请求断连覆盖成功结果
 - 备注：状态刷新失败不再覆盖聊天主回复
+
+## 2026-06-10 - 自动流动性与收益门槛
+
+- 修改：treasury policy、CAW fee、转账状态机、Rebalance UI、收款同步、测试
+- 意图：实现可按需从 Aave 补充流动性并按 Gas 净收益控制生息
+- 备注：收款只提示 Rebalance，不自动 supply
+
+## 2026-06-11 - 补齐撤销策略授权链路
+- 修改：Strategy 撤销状态、Pact 额度检查、Aave withdraw 失败处理与测试
+- 意图：撤销时按授权状态弹窗提示，并在审批后自动继续取回资产
+- 备注：CAW 拒绝后立即返回，不再等待余额变化
+
+## 2026-06-11 - 修复已完成转账占用本地锁
+- 修改：pending transfer 完成态保护、CAW 状态自愈与测试
+- 意图：避免旧状态覆盖 completed 后阻塞下一笔不同金额转账
+- 备注：新请求会先核对上一笔 request ID
+
+## 2026-06-11 - 修复低流动性自动取款转账
+- 修改：未知 Pact 拒绝、取款计划、双 Pact 续跑和并发状态保护
+- 意图：钱包余额不足时按流动性目标取款后继续目标地址转账
+- 备注：Aave Pact 额度按实际 withdraw amount 校验

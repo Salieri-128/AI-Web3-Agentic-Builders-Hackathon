@@ -9,6 +9,7 @@ export type StatusResponse = {
 export type Profile = {
   user_preferences?: {
     cash_buffer_usdc?: string | number | null;
+    liquidity_floor?: string | number | null;
     risk_level?: string;
     preferred_assets?: string[];
     blocked_assets?: string[];
@@ -81,6 +82,9 @@ export type TreasuryState = {
   asset: string;
   chain_id: string;
   balances: {
+    wallet_available?: string;
+    aave_withdrawable?: string;
+    gas_native?: string;
     wallet: string;
     yield?: string;
     aave?: string;
@@ -100,6 +104,26 @@ export type TreasuryState = {
     candidates: Record<string, string>;
     formula: string;
   };
+  liquidity?: {
+    target: string;
+    target_yield_balance: string;
+    components: Record<string, string>;
+    current_ratio: string;
+    average_daily_outflow: string;
+    annual_outflow: string;
+    formula: string;
+  };
+  rebalance_preview?: RebalancePreview | null;
+  pending_transfer?: {
+    id?: string;
+    stage: string;
+    status?: string;
+    destination: string;
+    amount: string;
+    withdraw_amount?: string;
+    reason?: string;
+    retryable?: boolean;
+  } | null;
   pacts: LocalPact[];
   aave?: {
     status?: string;
@@ -113,6 +137,28 @@ export type TreasuryState = {
   wallet_status?: WalletStatus;
   last_rebalance_at?: string | null;
   updated_at?: string | null;
+};
+
+export type RebalancePreview = {
+  action: "supply_to_aave" | "withdraw_from_aave" | "hold";
+  allowed: boolean;
+  amount: string;
+  expected_holding_days?: string;
+  expected_yield: string;
+  round_trip_gas?: string;
+  guarded_gas?: string;
+  net_benefit: string;
+  reason: string;
+  gas_available?: string;
+  required_native_gas?: string;
+  estimated_fees?: {
+    token_id?: string;
+    amounts_native?: Record<string, string>;
+    amounts_wbtc?: Record<string, string>;
+    prices?: Record<string, string>;
+    prices_available?: boolean;
+  };
+  liquidity: NonNullable<TreasuryState["liquidity"]>;
 };
 
 const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:8000";
@@ -182,6 +228,24 @@ export async function rebalanceTreasury(): Promise<Record<string, unknown>> {
   const response = await fetch(`${backendUrl}/api/treasury/rebalance`, { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to run rebalance");
+  }
+  const payload = await response.json();
+  return payload.data;
+}
+
+export async function previewTreasuryRebalance(): Promise<RebalancePreview> {
+  const response = await fetch(`${backendUrl}/api/treasury/rebalance/preview`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to preview rebalance");
+  }
+  const payload = await response.json();
+  return payload.data;
+}
+
+export async function syncTreasury(): Promise<Record<string, unknown>> {
+  const response = await fetch(`${backendUrl}/api/treasury/sync`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to sync treasury balances");
   }
   const payload = await response.json();
   return payload.data;
