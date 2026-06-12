@@ -10,6 +10,7 @@ from app.services.treasury_policy import (
     plan_transfer,
     project_stats_with_transfer,
 )
+from app.services.treasury_service import _migrate_strategy
 
 
 STRATEGY = {
@@ -17,6 +18,7 @@ STRATEGY = {
     "min_liquidity_ratio": "0.10",
     "liquidity_horizon_days": 7,
     "risk_multiplier": "1.20",
+    "recurring_single_multiplier": "1.50",
     "single_tx_multiplier": "1.50",
     "gas_safety_multiplier": "1.20",
     "min_rebalance_amount": "0.001",
@@ -40,7 +42,7 @@ class TreasuryPolicyTests(unittest.TestCase):
 
         self.assertEqual(effective["min_liquidity_ratio"], "0.15")
         self.assertEqual(effective["risk_multiplier"], "1.50")
-        self.assertEqual(effective["single_tx_multiplier"], "2.00")
+        self.assertEqual(effective["recurring_single_multiplier"], "2.00")
         self.assertEqual(effective["liquidity_horizon_days"], 14)
         self.assertTrue(impacts)
 
@@ -55,7 +57,9 @@ class TreasuryPolicyTests(unittest.TestCase):
 
         self.assertGreaterEqual(Decimal(effective["min_liquidity_ratio"]), Decimal("0.05"))
         self.assertGreaterEqual(Decimal(effective["risk_multiplier"]), Decimal("1"))
-        self.assertGreaterEqual(Decimal(effective["single_tx_multiplier"]), Decimal("1"))
+        self.assertGreaterEqual(
+            Decimal(effective["recurring_single_multiplier"]), Decimal("1")
+        )
 
     def test_low_gas_profile_raises_rebalance_threshold(self) -> None:
         effective, impacts = build_effective_strategy(
@@ -72,13 +76,18 @@ class TreasuryPolicyTests(unittest.TestCase):
             any(impact["profile_field"] == "prefers_low_gas" for impact in impacts)
         )
 
+    def test_old_single_transaction_multiplier_is_migrated(self) -> None:
+        migrated = _migrate_strategy({"single_tx_multiplier": "1.75"})
+
+        self.assertEqual(migrated["recurring_single_multiplier"], "1.75")
+
     def test_liquidity_target_uses_largest_constraint(self) -> None:
         result = calculate_liquidity_target(
             total_balance="1",
             stats={
                 "history_days": 7,
-                "transfer_sum": "0.14",
-                "p95_transfer_amount": "0.03",
+                "recurring_transfer_sum": "0.14",
+                "recurring_p90_transfer_amount": "0.03",
             },
             strategy=STRATEGY,
             user_floor="0.02",
@@ -100,6 +109,22 @@ class TreasuryPolicyTests(unittest.TestCase):
 
         self.assertEqual(projected["transfer_sum"], "0.08")
         self.assertEqual(projected["p95_transfer_amount"], "0.05")
+        self.assertEqual(projected["recurring_p90_transfer_amount"], "0.044")
+
+    def test_planned_outflow_is_a_separate_liquidity_candidate(self) -> None:
+        result = calculate_liquidity_target(
+            total_balance="1",
+            stats={
+                "history_days": 30,
+                "recurring_transfer_sum": "0.06",
+                "recurring_p90_transfer_amount": "0.02",
+                "planned_outflow_sum": "0.25",
+            },
+            strategy=STRATEGY,
+        )
+
+        self.assertEqual(result["components"]["planned_outflow"], "0.25")
+        self.assertEqual(result["target"], "0.25")
 
     def test_transfer_uses_wallet_without_withdraw(self) -> None:
         result = plan_transfer(

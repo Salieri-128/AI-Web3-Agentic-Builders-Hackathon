@@ -111,7 +111,18 @@ def parse_profile_patch(message: str) -> dict[str, Any]:
     if horizon_match:
         patch["liquidity_horizon_days"] = max(1, min(90, int(horizon_match.group(1))))
 
-    if any(keyword in normalized for keyword in ("低 gas", "low gas", "减少 gas", "节省 gas", "省 gas")):
+    if any(
+        keyword in normalized
+        for keyword in (
+            "低 gas",
+            "low gas",
+            "减少 gas",
+            "节省 gas",
+            "省 gas",
+            "减少频繁调仓",
+            "不要频繁操作",
+        )
+    ):
         patch["prefers_low_gas"] = True
     if any(keyword in normalized for keyword in ("不考虑 gas", "不在意 gas", "disable low gas", "关闭低 gas")):
         patch["prefers_low_gas"] = False
@@ -126,6 +137,14 @@ def parse_profile_patch(message: str) -> dict[str, Any]:
 
 def build_profile_proposal(message: str) -> dict[str, Any] | None:
     patch = parse_profile_patch(message)
+    return build_profile_proposal_from_patch(message, patch)
+
+
+def build_profile_proposal_from_patch(
+    message: str,
+    patch: dict[str, Any],
+) -> dict[str, Any] | None:
+    patch = _sanitize_patch(patch)
     if not patch:
         return None
 
@@ -145,6 +164,20 @@ def build_profile_proposal(message: str) -> dict[str, Any] | None:
         "proposed_profile": proposed,
         "created_at": _now_iso(),
     }
+
+
+def apply_profile_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    current = load_profile()
+    updated = _apply_patch(current, _sanitize_patch(patch))
+    save_profile(updated)
+    return updated
+
+
+def preview_profile_patch(
+    patch: dict[str, Any],
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _apply_patch(profile or load_profile(), _sanitize_patch(patch))
 
 
 def store_profile_proposal(proposal: dict[str, Any], impact: dict[str, Any]) -> dict[str, Any]:
@@ -222,6 +255,23 @@ def _sanitize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     sanitized["transaction_habits"]["prefers_low_gas"] = bool(
         habits.get("prefers_low_gas", False)
     )
+    return sanitized
+
+
+def _sanitize_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(patch, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    if patch.get("risk_level") in {"conservative", "balanced", "aggressive"}:
+        sanitized["risk_level"] = patch["risk_level"]
+    if "liquidity_floor" in patch:
+        sanitized["liquidity_floor"] = _optional_amount(patch["liquidity_floor"])
+    if "liquidity_horizon_days" in patch:
+        sanitized["liquidity_horizon_days"] = _optional_days(
+            patch["liquidity_horizon_days"]
+        )
+    if "prefers_low_gas" in patch and isinstance(patch["prefers_low_gas"], bool):
+        sanitized["prefers_low_gas"] = patch["prefers_low_gas"]
     return sanitized
 
 

@@ -64,7 +64,7 @@ export function StrategyDataPanel({ profile, treasury }: StrategyDataPanelProps)
       <section className="strategy-data-grid">
         <DataCard title="公式候选值" rows={candidateRows} emptyText="暂无候选值数据。" />
         <DataCard title="用户画像 / Memory" rows={memoryRows} emptyText="暂无用户画像数据。" />
-        <DataCard title="历史转账数据" rows={transferRows} emptyText="暂无转账统计数据。" />
+        <DataCard title="历史转账：原始 vs 策略" rows={transferRows} emptyText="暂无转账统计数据。" />
         <DataCard title="策略参数" rows={strategyRows} emptyText="暂无策略参数。" />
       </section>
     </section>
@@ -103,7 +103,8 @@ function buildCandidateRows(treasury: TreasuryState | null): DataRow[] {
     user_floor: { label: "最低保留", note: "用户设置与策略基础缓冲的较大值" },
     min_liquidity_ratio: { label: "最低比例", note: "总资金乘以最小流动性比例" },
     flow_horizon: { label: "流出需求", note: "日均流出乘以流动性周期和风险系数" },
-    p95_transfer: { label: "P95 单笔", note: "历史 P95 转账额乘以单笔系数" },
+    recurring_single_buffer: { label: "经常性单笔缓冲", note: "经常性 P90 乘以画像对应缓冲系数" },
+    planned_outflow: { label: "计划支出", note: "到期前且位于覆盖周期内的已知未来支出" },
     economic_batch: { label: "经济批量", note: "综合取款 Gas、转账频率和 Aave APY" },
   };
 
@@ -155,23 +156,47 @@ function buildTransferRows(treasury: TreasuryState | null, asset: string): DataR
     {
       label: "转账次数",
       value: String(stats.weekly_transfer_count),
-      note: "当前统计窗口内的外部转账次数",
+      note: "原始审计窗口内的全部外部转账",
+      source: "HISTORY",
     },
     {
-      label: "转账总额",
+      label: "原始转账总额",
       value: `${stats.weekly_transfer_sum} ${asset}`,
-      note: "用于估算短期流动性需求",
+      note: "完整历史，仅用于展示和审计",
+      source: "HISTORY",
     },
     {
-      label: "最大单笔",
+      label: "原始最大单笔",
       value: `${stats.weekly_max_single_amount} ${asset}`,
-      note: "用于保留可覆盖单笔需求的资金",
+      note: "保留展示，但不再直接进入流动性公式",
+      source: "HISTORY",
     },
     {
-      label: "平均单笔",
-      value: `${stats.weekly_avg_transfer_amount} ${asset}`,
-      note: "辅助理解近期资金使用节奏",
+      label: "经常性总额",
+      value: `${stats.recurring_transfer_sum} ${asset}`,
+      note: "排除一次性大额后，用于 flow horizon",
+      source: "STRATEGY",
     },
+    {
+      label: "经常性 P90",
+      value: `${stats.recurring_p90_transfer_amount} ${asset}`,
+      note: "线性插值 P90，用于经常性单笔缓冲",
+      source: "STRATEGY",
+    },
+    {
+      label: "一次性大额",
+      value: `${stats.one_off_transfer_sum} ${asset} / ${stats.excluded_transfer_count} 笔`,
+      note: "从策略样本排除，仍保留在原始历史和 Audit Log",
+      source: "STRATEGY",
+    },
+    ...stats.transfer_classifications
+      .filter((item) => item.classification === "one_off")
+      .map((item) => ({
+        label: `排除 ${item.amount} ${asset}`,
+        value: item.source === "user" ? "人工确认" : "自动异常",
+        note: item.reason,
+        source: item.source === "user" ? "PROFILE" : "SYSTEM",
+      })),
   ];
 }
 
@@ -183,7 +208,7 @@ function buildStrategyRows(treasury: TreasuryState | null, asset: string): DataR
     ["liquidity_horizon_days", "流动性周期", "希望钱包覆盖的未来转账天数"],
     ["min_liquidity_ratio", "最小流动性比例", "总资金乘以该比例"],
     ["risk_multiplier", "风险系数", "放大近期转账总额"],
-    ["single_tx_multiplier", "单笔系数", "放大最大单笔转账"],
+    ["recurring_single_multiplier", "经常性单笔系数", "放大经常性 P90，不使用原始最大单笔"],
     ["min_rebalance_amount", "最小调仓金额", "低于该值不触发调仓"],
     ["aave_apy", "Aave APY", "用于估算收益是否覆盖 Gas"],
     ["max_holding_days", "最长持有期", "收益评估采用的持有时间上限"],

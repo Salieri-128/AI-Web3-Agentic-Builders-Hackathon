@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -63,6 +64,55 @@ Rules:
 - If a submitted Pact is not active yet, choose wait_for_pact_approval.
 - If a usable Pact exists, choose use_existing_pact or execute_with_pact and include pact_id.
 - Never claim that you approved a Pact yourself."""
+
+LLM_TREASURY_PLANNER_PROMPT = """You are the language-understanding layer for a treasury planner.
+Convert the user's funding goal into strict JSON. Do not calculate liquidity, invent strategy
+coefficients, decide Pact usability, approve permissions, or trigger transactions.
+
+Return only this shape:
+{
+  "intent": "treasury_goal|transfer_classification|none",
+  "profile_patch": {
+    "risk_level": "conservative|balanced|aggressive",
+    "liquidity_floor": "optional WBTC decimal string",
+    "liquidity_horizon_days": "optional integer 1-90",
+    "prefers_low_gas": "optional boolean"
+  },
+  "planned_outflows": [
+    {
+      "amount": "WBTC decimal string",
+      "due_at": "optional ISO-8601 datetime",
+      "due_in_days": "optional integer",
+      "description": "short description"
+    }
+  ],
+  "transfer_classification": {
+    "classification": "one_off|recurring",
+    "amount": "optional WBTC decimal string",
+    "destination": "optional address",
+    "time_hint": "latest|optional ISO-8601 datetime"
+  },
+  "confidence": 0.0,
+  "missing_information": ["short field name"],
+  "needs_clarification": false,
+  "clarification_question": "",
+  "complex_goal": false
+}
+
+Use treasury_goal for profile preferences or future planned spending. Use
+transfer_classification when the user says a historical transfer was one-off or recurring.
+Ask one focused clarification question when the goal is materially ambiguous. The backend
+will validate every field and compute all monetary results."""
+
+LLM_TREASURY_EXPLANATION_PROMPT = """You explain a deterministic treasury plan.
+Use only the supplied backend-calculated scenarios. Never change an amount, formula parameter,
+Pact status, address permission, or action. Explain why recurring history differs from raw
+history, mention excluded one-off transfers when present, and state that scenario selection
+only changes strategy inputs. Describe expected_action as a simulation, never as an immediate
+or completed operation. If scenarios have the same result, explicitly identify the common
+dominant candidate (for example a user liquidity floor or planned outflow) instead of implying
+that risk parameters changed the result. Reply in the user's language using concise paragraphs.
+Do not use Markdown headings, bold markers, or tables."""
 
 
 def is_llm_configured() -> bool:
@@ -220,6 +270,113 @@ async def decide_transfer_flow(
             }
 
     raise last_error or RuntimeError("LLM transfer-flow decision request failed.")
+
+
+async def interpret_treasury_goal(
+    *,
+    message: str,
+    profile: dict[str, Any] | None,
+    planning_context: dict[str, Any] | None = None,
+    recent_transfers: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not is_llm_configured():
+        return {"intent": "none", "llm_used": False}
+    parsed, model = await _request_json(
+        system_prompt=LLM_TREASURY_PLANNER_PROMPT,
+        content={
+            "current_time": datetime.now(timezone.utc).isoformat(),
+            "user_message": message,
+            "memory_profile": profile or {},
+            "planning_context": planning_context or {},
+            "recent_transfers": recent_transfers or [],
+        },
+        temperature=0.1,
+    )
+    parsed["llm_used"] = True
+    parsed["llm_model"] = model
+    return parsed
+
+
+async def explain_treasury_plan(
+    *,
+    message: str,
+    treasury_plan: dict[str, Any],
+) -> str:
+    if not is_llm_configured():
+        return ""
+    payload_messages = [
+        {"role": "system", "content": LLM_TREASURY_EXPLANATION_PROMPT},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "user_message": message,
+                    "backend_treasury_plan": treasury_plan,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    last_error: RuntimeError | None = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        for model in _candidate_models():
+            payload = {
+                "model": model,
+                "messages": payload_messages,
+                "temperature": 0.3,
+            }
+            response = await _post_chat_completion(client, payload)
+            try:
+                _raise_for_llm_error(response)
+            except RuntimeError as error:
+                last_error = error
+                if _is_model_unavailable_error(response):
+                    continue
+                raise
+            return response.json()["choices"][0]["message"]["content"].strip()
+    raise last_error or RuntimeError("LLM treasury explanation request failed.")
+
+
+async def _request_json(
+    *,
+    system_prompt: str,
+    content: dict[str, Any],
+    temperature: float,
+) -> tuple[dict[str, Any], str]:
+    last_error: RuntimeError | None = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        for model in _candidate_models():
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": json.dumps(content, ensure_ascii=False),
+                    },
+                ],
+                "temperature": temperature,
+                "response_format": {"type": "json_object"},
+            }
+            response = await _post_chat_completion(client, payload)
+            if response.status_code == 400 and "response_format" in payload:
+                fallback_payload = payload.copy()
+                fallback_payload.pop("response_format", None)
+                response = await _post_chat_completion(client, fallback_payload)
+            try:
+                _raise_for_llm_error(response)
+            except RuntimeError as error:
+                last_error = error
+                if _is_model_unavailable_error(response):
+                    continue
+                raise
+            return (
+                _parse_json_content(
+                    response.json()["choices"][0]["message"]["content"]
+                ),
+                response.json().get("model", model),
+            )
+    raise last_error or RuntimeError("LLM JSON request failed.")
 
 
 def _candidate_models() -> list[str]:

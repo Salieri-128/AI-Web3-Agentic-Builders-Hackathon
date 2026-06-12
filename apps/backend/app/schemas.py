@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class ChatRequest(BaseModel):
     message: str
+    planning_session_id: str | None = None
 
 
 class StatusResponse(BaseModel):
@@ -25,6 +26,10 @@ class ChatResponse(BaseModel):
     wallet: dict[str, Any] | None = None
     audit_logs: list[dict[str, Any]]
     profile: dict[str, Any] | None
+    planning_session_id: str | None = None
+    clarification: dict[str, Any] | None = None
+    treasury_plan: dict[str, Any] | None = None
+    transfer_classification_proposal: dict[str, Any] | None = None
 
 
 class PactProposalRequest(BaseModel):
@@ -63,6 +68,20 @@ class PactApprovalRequest(BaseModel):
 
 class MemoryProposalRequest(BaseModel):
     proposal_id: str
+
+
+class TreasuryPlanSelectionRequest(BaseModel):
+    plan_id: str
+    scenario_id: str
+
+
+class TransferClassificationRequest(BaseModel):
+    proposal_id: str
+
+
+class DirectTransferClassificationRequest(BaseModel):
+    event_id: str
+    classification: str
 
 
 class AavePactRequest(BaseModel):

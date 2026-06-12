@@ -1,6 +1,6 @@
 import { TreasuryState } from "../api";
 
-type StrategyPhase =
+export type StrategyPhase =
   | "idle"
   | "submitting_pact"
   | "waiting_pact"
@@ -267,6 +267,9 @@ function getStrategyStatusText(
   }
   if (isStrategyActive) {
     return `策略运行中，Aave 当前持有 ${yieldBalance} ${asset}`;
+  }
+  if (pactStatus.includes("授权已生效")) {
+    return "策略尚未执行，CAW 授权已就绪";
   }
   return pactStatus;
 }

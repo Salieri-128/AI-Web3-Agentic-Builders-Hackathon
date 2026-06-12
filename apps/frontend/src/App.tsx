@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { ChatPanel, ChatTurn } from "./components/ChatPanel";
+import { ClassificationAttentionBanner } from "./components/ClassificationAttentionBanner";
+import { FundsOptimizationPanel } from "./components/FundsOptimizationPanel";
 import { HistoryItem, HistoryPanel } from "./components/HistoryPanel";
 import { PortfolioPanel } from "./components/PortfolioPanel";
-import { StrategyDataPanel } from "./components/StrategyDataPanel";
-import { TreasuryPanel } from "./components/TreasuryPanel";
 import {
+  applyTransferClassification,
   AuditLog,
   approveTreasuryPact,
   ChatResponse,
+  Clarification,
   confirmMemoryProposal,
+  confirmTransferClassification,
   executePendingTransfer,
   fetchPendingTransferStatus,
   fetchProfile,
@@ -23,12 +26,16 @@ import {
   previewTreasuryRebalance,
   rebalanceTreasury,
   rejectMemoryProposal,
+  rejectTransferClassification,
+  selectTreasuryPlan,
   sendChat,
   StatusResponse,
   submitAavePact,
   syncTreasury,
   syncWorkspace,
   TreasuryState,
+  TreasuryPlan,
+  TransferClassificationProposal,
   WalletStatus,
   withdrawAave,
 } from "./api";
@@ -43,7 +50,7 @@ type StrategyPhase =
   | "canceling"
   | "completed";
 
-type AppTab = "chat" | "portfolio" | "strategy" | "strategyData" | "history";
+type AppTab = "chat" | "portfolio" | "optimization" | "history";
 
 const TAB_META: Array<{
   id: AppTab;
@@ -55,9 +62,9 @@ const TAB_META: Array<{
   {
     id: "chat",
     index: "01",
-    label: "Agent",
-    title: "Treasury command center",
-    description: "Talk to the agent, review its reasoning, and keep every money movement inside an approved Pact.",
+    label: "Wallet",
+    title: "Simple wallet",
+    description: "Check balances, receive funds, and send protected transfers without managing treasury parameters.",
   },
   {
     id: "portfolio",
@@ -67,22 +74,15 @@ const TAB_META: Array<{
     description: "Inspect wallet and Aave positions across the demo environment without exposing execution credentials.",
   },
   {
-    id: "strategy",
+    id: "optimization",
     index: "03",
-    label: "Strategy",
-    title: "Liquidity strategy",
-    description: "Preview the proposed rebalance, approve its permission boundary, and follow execution status.",
-  },
-  {
-    id: "strategyData",
-    index: "04",
-    label: "Policy data",
-    title: "Decision inputs",
-    description: "See the profile, transfer history, and deterministic policy values behind the recommendation.",
+    label: "Funds optimization",
+    title: "Funds optimization",
+    description: "Activate the Aave strategy first, then optionally tune yield and liquidity goals with the AI planner.",
   },
   {
     id: "history",
-    index: "05",
+    index: "04",
     label: "Audit trail",
     title: "Execution history",
     description: "Review prior requests and the full structured result returned by the agent.",
@@ -98,6 +98,7 @@ function App() {
   const [treasury, setTreasury] = useState<TreasuryState | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [messages, setMessages] = useState<ChatTurn[]>([]);
+  const [optimizationMessages, setOptimizationMessages] = useState<ChatTurn[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [chatPendingText, setChatPendingText] = useState("正在处理请求...");
@@ -107,6 +108,13 @@ function App() {
   const [incomingNotice, setIncomingNotice] = useState<string | null>(null);
   const [memoryProposal, setMemoryProposal] = useState<MemoryProposal | null>(null);
   const [isMemoryBusy, setIsMemoryBusy] = useState(false);
+  const [planningSessionId, setPlanningSessionId] = useState<string | null>(null);
+  const [clarification, setClarification] = useState<Clarification | null>(null);
+  const [treasuryPlan, setTreasuryPlan] = useState<TreasuryPlan | null>(null);
+  const [transferClassificationProposal, setTransferClassificationProposal] =
+    useState<TransferClassificationProposal | null>(null);
+  const [isPlannerBusy, setIsPlannerBusy] = useState(false);
+  const [isClassificationBusy, setIsClassificationBusy] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -116,7 +124,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === "strategy") {
+    if (activeTab === "optimization") {
       void refreshRebalancePreview();
     }
   }, [activeTab]);
@@ -154,30 +162,65 @@ function App() {
   }
 
   async function handleSend(message: string) {
+    const strategyActive = isTreasuryStrategyActive(treasury, strategyPhase);
+    const isOptimizationRequest =
+      activeTab === "optimization" ||
+      Boolean(planningSessionId) ||
+      looksLikeTreasuryGoal(message);
+    if (isOptimizationRequest && !strategyActive) {
+      const unlockReply = "请先在资金优化页执行安心生息策略。策略运行后，才会解锁资金目标和 AI Planner。";
+      setMessages((current) => [
+        ...current,
+        { role: "user", content: message },
+        { role: "agent", content: unlockReply },
+      ]);
+      setActiveTab("optimization");
+      return;
+    }
+
     setIsSending(true);
     setChatPendingText(getInitialChatPendingText(message));
     setError(null);
-    setMessages([{ role: "user", content: message }]);
+    const userTurn: ChatTurn = { role: "user", content: message };
+    setMessages((current) => [...current, userTurn]);
+    if (isOptimizationRequest) {
+      setOptimizationMessages([userTurn]);
+    }
     const directTransferTimer = window.setTimeout(() => {
       if (looksLikeTransferRequest(message)) {
         setChatPendingText("正在检查余额和可用 Pact；如果已有授权，正在交易中...");
       }
     }, 1200);
     try {
-      const response: ChatResponse = await sendChat(message);
+      const response: ChatResponse = await sendChat(message, planningSessionId);
       window.clearTimeout(directTransferTimer);
-      setMessages([
-        { role: "user", content: message },
-        {
-          role: "agent",
-          content: response.reply,
-          llmUsed: response.llm_used,
-          cawUsed: response.caw_used,
-          memoryUpdated: response.memory_updated,
-        },
-      ]);
+      const responseTurn: ChatTurn = {
+        role: "agent",
+        content: response.reply,
+        llmUsed: response.llm_used,
+        cawUsed: response.caw_used,
+        memoryUpdated: response.memory_updated,
+      };
+      setMessages((current) => [...current, responseTurn]);
+      if (isOptimizationRequest) {
+        setOptimizationMessages([userTurn, responseTurn]);
+      }
       setProposal(response.proposal);
       setMemoryProposal(response.memory_proposal ?? null);
+      setPlanningSessionId(response.planning_session_id ?? null);
+      setClarification(response.clarification ?? null);
+      setTreasuryPlan(response.treasury_plan ?? null);
+      setTransferClassificationProposal(
+        response.transfer_classification_proposal ?? null,
+      );
+      if (
+        response.memory_proposal ||
+        response.clarification ||
+        response.treasury_plan ||
+        response.transfer_classification_proposal
+      ) {
+        setActiveTab("optimization");
+      }
       setWallet(response.wallet ?? wallet);
       await refreshTreasuryAfterChat();
       setAuditLogs(response.audit_logs);
@@ -193,22 +236,10 @@ function App() {
       ]);
       if (isWaitingForTransferApproval(response)) {
         setChatPendingText("已提交新的 CAW Pact，正在等待 owner approve...");
-        const pendingResult = await waitForPendingTransferExecution((content) => {
-          setChatPendingText(content);
-          setMessages([
-            { role: "user", content: message },
-            {
-              role: "agent",
-              content,
-              llmUsed: response.llm_used,
-              cawUsed: true,
-              memoryUpdated: response.memory_updated,
-            },
-          ]);
-        });
+        const pendingResult = await waitForPendingTransferExecution(setChatPendingText);
         const pendingReply = buildPendingTransferReply(pendingResult);
-        setMessages([
-          { role: "user", content: message },
+        setMessages((current) => [
+          ...current,
           {
             role: "agent",
             content: pendingReply,
@@ -231,10 +262,16 @@ function App() {
       window.clearTimeout(directTransferTimer);
       const messageText = currentError instanceof Error ? currentError.message : "Chat request failed";
       setError(messageText);
-      setMessages([
-        { role: "user", content: message },
+      setMessages((current) => [
+        ...current,
         { role: "agent", content: messageText },
       ]);
+      if (isOptimizationRequest) {
+        setOptimizationMessages([
+          userTurn,
+          { role: "agent", content: messageText },
+        ]);
+      }
       setHistory((items) => [
         {
           id: `${Date.now()}`,
@@ -257,6 +294,14 @@ function App() {
     } catch (currentError) {
       setError(currentError instanceof Error ? currentError.message : "Treasury refresh failed");
     }
+  }
+
+  function publishOptimizationResult(turn: ChatTurn) {
+    setMessages((current) => [...current, turn]);
+    setOptimizationMessages((current) => {
+      const userTurn = [...current].reverse().find((message) => message.role === "user");
+      return userTurn ? [userTurn, turn] : [turn];
+    });
   }
 
   async function refreshStatusAfterChat() {
@@ -341,16 +386,13 @@ function App() {
       setProfile(result.profile);
       setTreasury(result.treasury);
       setMemoryProposal(null);
-      setMessages((current) => [
-        ...current,
-        {
-          role: "agent",
-          content: impact
-            ? `画像已应用。建议保留流动性从 ${impact.before.recommended_liquidity} 调整为 ${impact.after.recommended_liquidity} ${impact.asset}。CAW Pact 权限未改变。`
-            : "画像已应用，流动性建议已重新计算。",
-          memoryUpdated: true,
-        },
-      ]);
+      publishOptimizationResult({
+        role: "agent",
+        content: impact
+          ? `画像已应用。建议保留流动性从 ${impact.before.recommended_liquidity} 调整为 ${impact.after.recommended_liquidity} ${impact.asset}。CAW Pact 权限未改变。`
+          : "画像已应用，流动性建议已重新计算。",
+        memoryUpdated: true,
+      });
       setSyncNotice("用户画像已应用，流动性建议已重新计算。");
     } catch (currentError) {
       setError(currentError instanceof Error ? currentError.message : "Memory proposal failed");
@@ -366,14 +408,106 @@ function App() {
       const result = await rejectMemoryProposal(proposalId);
       setProfile(result.profile);
       setMemoryProposal(null);
-      setMessages((current) => [
-        ...current,
-        { role: "agent", content: "画像变更已拒绝，当前流动性策略保持不变。" },
-      ]);
+      publishOptimizationResult({
+        role: "agent",
+        content: "画像变更已拒绝，当前流动性策略保持不变。",
+      });
     } catch (currentError) {
       setError(currentError instanceof Error ? currentError.message : "Memory proposal rejection failed");
     } finally {
       setIsMemoryBusy(false);
+    }
+  }
+
+  async function handleSelectTreasuryPlan(planId: string, scenarioId: string) {
+    setIsPlannerBusy(true);
+    setError(null);
+    const selectedScenario = treasuryPlan?.scenarios.find(
+      (scenario) => scenario.scenario_id === scenarioId,
+    );
+    try {
+      const result = await selectTreasuryPlan(planId, scenarioId);
+      setProfile(result.profile);
+      setTreasury(result.treasury);
+      setTreasuryPlan(null);
+      setClarification(null);
+      setPlanningSessionId(null);
+      publishOptimizationResult({
+        role: "agent",
+        content: selectedScenario
+          ? `已应用${selectedScenario.label}：建议保留 ${selectedScenario.after.recommended_liquidity} WBTC，Aave 目标 ${selectedScenario.after.target_yield_balance} WBTC。这里只更新策略输入，没有提交 Pact 或执行资金操作。`
+          : "方案已应用，策略建议已重新计算；CAW Pact 和执行状态未改变。",
+        memoryUpdated: true,
+      });
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Treasury plan selection failed");
+    } finally {
+      setIsPlannerBusy(false);
+    }
+  }
+
+  async function handleConfirmTransferClassification(proposalId: string) {
+    setIsPlannerBusy(true);
+    setError(null);
+    const currentProposal = transferClassificationProposal;
+    try {
+      const result = await confirmTransferClassification(proposalId);
+      setProfile(result.profile);
+      setTreasury(result.treasury);
+      setTransferClassificationProposal(null);
+      setClarification(null);
+      setPlanningSessionId(null);
+      publishOptimizationResult({
+        role: "agent",
+        content: currentProposal
+          ? `历史分类已应用。经常性总额从 ${currentProposal.statistics_before.recurring_transfer_sum} 调整为 ${currentProposal.statistics_after.recurring_transfer_sum} WBTC，原始审计事件保持不变。`
+          : "历史分类已应用，流动性建议已重新计算。",
+        memoryUpdated: true,
+      });
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Transfer classification failed");
+    } finally {
+      setIsPlannerBusy(false);
+    }
+  }
+
+  async function handleRejectTransferClassification(proposalId: string) {
+    setIsPlannerBusy(true);
+    setError(null);
+    try {
+      await rejectTransferClassification(proposalId);
+      setTransferClassificationProposal(null);
+      setPlanningSessionId(null);
+      publishOptimizationResult({
+        role: "agent",
+        content: "已保持自动分类结果，流动性模型和原始审计记录都没有变化。",
+      });
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Classification rejection failed");
+    } finally {
+      setIsPlannerBusy(false);
+    }
+  }
+
+  async function handleClassificationAttention(
+    eventId: string,
+    classification: "one_off" | "recurring",
+  ) {
+    setIsClassificationBusy(true);
+    setError(null);
+    try {
+      const result = await applyTransferClassification(eventId, classification);
+      setProfile(result.profile);
+      setTreasury(result.treasury);
+      setSyncNotice(
+        classification === "one_off"
+          ? "已确认该笔转账为一次性，后台流动性建议已更新。"
+          : "已将该笔转账视为经常性，后台流动性建议已更新。",
+      );
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : "Classification update failed");
+    } finally {
+      setIsClassificationBusy(false);
     }
   }
 
@@ -481,9 +615,10 @@ function App() {
 
   const activeTabMeta = TAB_META.find((tab) => tab.id === activeTab) ?? TAB_META[0];
   const servicesOnline = status?.backend === "ok" || status?.backend === "ready";
+  const strategyActive = isTreasuryStrategyActive(treasury, strategyPhase);
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${activeTab === "chat" ? "wallet-shell" : ""}`}>
       <a className="skip-link" href="#workspace-content">Skip to workspace</a>
 
       <aside className="app-sidebar">
@@ -529,7 +664,7 @@ function App() {
         </div>
       </aside>
 
-      <section className="app-workspace">
+      <section className={`app-workspace ${activeTab === "chat" ? "wallet-workspace" : ""}`}>
         <header className="app-header">
           <div className="page-heading">
             <span className="page-index">Workspace / {activeTabMeta.index}</span>
@@ -557,7 +692,10 @@ function App() {
           </div>
         </header>
 
-        <section className="workspace-content" id="workspace-content">
+        <section
+          className={`workspace-content ${activeTab === "chat" ? "wallet-content" : ""}`}
+          id="workspace-content"
+        >
           {error && <div className="error-banner" role="alert">{error}</div>}
           {incomingNotice && (
             <div className="incoming-banner" role="status">
@@ -571,6 +709,13 @@ function App() {
               <button onClick={() => setSyncNotice(null)} type="button">关闭</button>
             </div>
           )}
+          {treasury?.classification_attention && (
+            <ClassificationAttentionBanner
+              attention={treasury.classification_attention}
+              isBusy={isClassificationBusy}
+              onClassify={handleClassificationAttention}
+            />
+          )}
 
           {activeTab === "chat" && (
             <section className="chat-tab-layout">
@@ -579,30 +724,41 @@ function App() {
                 isSending={isSending}
                 pendingText={chatPendingText}
                 onSend={handleSend}
-                memoryProposal={memoryProposal}
-                isMemoryBusy={isMemoryBusy || isSending}
-                onConfirmMemory={handleConfirmMemory}
-                onRejectMemory={handleRejectMemory}
+                walletAddress={getWalletAddress(wallet, treasury)}
+                asset={treasury?.asset ?? "WBTC"}
+                onOpenOptimization={() => setActiveTab("optimization")}
               />
             </section>
           )}
 
           {activeTab === "portfolio" && <PortfolioPanel wallet={wallet} treasury={treasury} />}
 
-          {activeTab === "strategy" && (
-            <section className="strategy-layout">
-              <TreasuryPanel
-                treasury={treasury}
-                isBusy={isTreasuryBusy}
-                strategyPhase={strategyPhase}
-                onExecuteStrategy={handleExecuteStrategy}
-                onCancelStrategy={handleCancelStrategy}
-                onApprovePact={handleApproveTreasuryPact}
-              />
-            </section>
+          {activeTab === "optimization" && (
+            <FundsOptimizationPanel
+              messages={optimizationMessages}
+              strategyActive={strategyActive}
+              isSending={isSending}
+              onSend={handleSend}
+              profile={profile}
+              treasury={treasury}
+              memoryProposal={memoryProposal}
+              clarification={clarification}
+              treasuryPlan={treasuryPlan}
+              transferClassificationProposal={transferClassificationProposal}
+              isMemoryBusy={isMemoryBusy || isSending}
+              isPlannerBusy={isPlannerBusy || isSending}
+              isTreasuryBusy={isTreasuryBusy}
+              strategyPhase={strategyPhase}
+              onConfirmMemory={handleConfirmMemory}
+              onRejectMemory={handleRejectMemory}
+              onSelectTreasuryPlan={handleSelectTreasuryPlan}
+              onConfirmTransferClassification={handleConfirmTransferClassification}
+              onRejectTransferClassification={handleRejectTransferClassification}
+              onExecuteStrategy={handleExecuteStrategy}
+              onCancelStrategy={handleCancelStrategy}
+              onApprovePact={handleApproveTreasuryPact}
+            />
           )}
-
-          {activeTab === "strategyData" && <StrategyDataPanel profile={profile} treasury={treasury} />}
 
           {activeTab === "history" && <HistoryPanel items={history} />}
         </section>
@@ -718,6 +874,20 @@ function formatPactAmount(amount: number) {
   }).format(amount);
 }
 
+function getWalletAddress(
+  wallet: WalletStatus | null,
+  treasury: TreasuryState | null,
+) {
+  if (treasury?.aave?.wallet_address) {
+    return treasury.aave.wallet_address;
+  }
+  const sepoliaAddress = wallet?.addresses?.find(
+    (item) => String(item.chain_id ?? "") === "SETH",
+  );
+  const fallbackAddress = sepoliaAddress ?? wallet?.addresses?.[0];
+  return fallbackAddress ? String(fallbackAddress.address ?? "") : null;
+}
+
 function assertRebalanceSucceeded(result: Record<string, unknown>) {
   const status = String(result.status ?? "");
   if (status === "execution_failed" || status === "internal_rebalance_pact_required") {
@@ -749,6 +919,47 @@ function getInitialChatPendingText(message: string) {
     return "正在检查余额和可用 Pact...";
   }
   return "正在处理请求...";
+}
+
+function isTreasuryStrategyActive(
+  treasury: TreasuryState | null,
+  strategyPhase: StrategyPhase,
+) {
+  if (
+    [
+      "cancel_submitting_pact",
+      "cancel_waiting_pact",
+      "canceling",
+    ].includes(strategyPhase)
+  ) {
+    return false;
+  }
+  const aaveBalance = Number(
+    treasury?.balances.yield ?? treasury?.balances.aave ?? 0,
+  );
+  return strategyPhase === "completed" || aaveBalance > 0;
+}
+
+function looksLikeTreasuryGoal(message: string) {
+  const normalized = message.toLowerCase();
+  return [
+    "提高收益",
+    "资金优化",
+    "至少保留",
+    "覆盖",
+    "下周",
+    "未来支出",
+    "低 gas",
+    "低gas",
+    "保守",
+    "激进",
+    "流动性",
+    "optimize",
+    "yield",
+    "liquidity",
+    "conservative",
+    "aggressive",
+  ].some((keyword) => normalized.includes(keyword));
 }
 
 function looksLikeTransferRequest(message: string) {

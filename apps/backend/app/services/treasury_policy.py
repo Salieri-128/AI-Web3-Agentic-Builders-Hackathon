@@ -10,20 +10,20 @@ RISK_STRATEGY_OVERRIDES: dict[str, dict[str, Any]] = {
     "conservative": {
         "min_liquidity_ratio": "0.15",
         "risk_multiplier": "1.50",
-        "single_tx_multiplier": "2.00",
+        "recurring_single_multiplier": "2.00",
     },
     "balanced": {},
     "aggressive": {
         "min_liquidity_ratio": "0.07",
         "risk_multiplier": "1.00",
-        "single_tx_multiplier": "1.20",
+        "recurring_single_multiplier": "1.20",
     },
 }
 
 SYSTEM_SAFETY_FLOORS = {
     "min_liquidity_ratio": Decimal("0.05"),
     "risk_multiplier": Decimal("1.00"),
-    "single_tx_multiplier": Decimal("1.00"),
+    "recurring_single_multiplier": Decimal("1.00"),
 }
 
 
@@ -32,6 +32,8 @@ def build_effective_strategy(
     profile: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     effective = dict(base_strategy)
+    if "recurring_single_multiplier" not in effective:
+        effective["recurring_single_multiplier"] = effective.get("single_tx_multiplier", "1")
     impacts: list[dict[str, Any]] = []
     preferences = (profile or {}).get("user_preferences", {})
     habits = (profile or {}).get("transaction_habits", {})
@@ -102,7 +104,12 @@ def calculate_liquidity_target(
     total = asset_amount(total_balance)
     apy = decimal(strategy.get("aave_apy", "0"))
     history_days = max(1, int(stats.get("history_days", 7)))
-    transfer_sum = asset_amount(stats.get("transfer_sum", stats.get("weekly_transfer_sum", "0")))
+    transfer_sum = asset_amount(
+        stats.get(
+            "recurring_transfer_sum",
+            stats.get("transfer_sum", stats.get("weekly_transfer_sum", "0")),
+        )
+    )
     average_daily_outflow = transfer_sum / Decimal(history_days)
     annual_outflow = average_daily_outflow * Decimal("365")
     withdraw_gas = asset_amount(estimated_withdraw_gas_asset)
@@ -111,9 +118,13 @@ def calculate_liquidity_target(
     if withdraw_gas > 0 and annual_outflow > 0 and apy > 0:
         economic_batch = decimal((Decimal("2") * withdraw_gas * annual_outflow / apy).sqrt())
 
-    p95_transfer = asset_amount(
-        stats.get("p95_transfer_amount", stats.get("weekly_max_single_amount", "0"))
+    recurring_p90 = asset_amount(
+        stats.get(
+            "recurring_p90_transfer_amount",
+            stats.get("p95_transfer_amount", stats.get("weekly_max_single_amount", "0")),
+        )
     )
+    planned_outflow = asset_amount(stats.get("planned_outflow_sum", "0"))
     candidates = {
         "user_floor": max(asset_amount(user_floor), asset_amount(strategy.get("base_buffer", "0"))),
         "min_liquidity_ratio": total * decimal(strategy.get("min_liquidity_ratio", "0")),
@@ -122,7 +133,14 @@ def calculate_liquidity_target(
             * decimal(strategy.get("liquidity_horizon_days", strategy.get("rebalance_horizon_days", 7)))
             * decimal(strategy.get("risk_multiplier", "1"))
         ),
-        "p95_transfer": p95_transfer * decimal(strategy.get("single_tx_multiplier", "1")),
+        "recurring_single_buffer": recurring_p90
+        * decimal(
+            strategy.get(
+                "recurring_single_multiplier",
+                strategy.get("single_tx_multiplier", "1"),
+            )
+        ),
+        "planned_outflow": planned_outflow,
         "economic_batch": economic_batch,
     }
     target = min(total, max(candidates.values())) if total > 0 else Decimal("0")
@@ -135,7 +153,7 @@ def calculate_liquidity_target(
         "formula": (
             "min(total, max(user_floor, total * min_liquidity_ratio, "
             "avg_daily_outflow * liquidity_horizon_days * risk_multiplier, "
-            "p95_transfer * single_tx_multiplier, economic_batch))"
+            "recurring_p90 * recurring_single_multiplier, planned_outflow, economic_batch))"
         ),
     }
 
@@ -190,7 +208,12 @@ def calculate_rebalance_economics(
     excess = max(Decimal("0"), wallet - target)
     min_rebalance = asset_amount(strategy.get("min_rebalance_amount", "0"))
     history_days = max(1, int(stats.get("history_days", 7)))
-    transfer_sum = asset_amount(stats.get("transfer_sum", stats.get("weekly_transfer_sum", "0")))
+    transfer_sum = asset_amount(
+        stats.get(
+            "recurring_transfer_sum",
+            stats.get("transfer_sum", stats.get("weekly_transfer_sum", "0")),
+        )
+    )
     average_daily_outflow = transfer_sum / Decimal(history_days)
     minimum_holding_days = decimal(
         strategy.get("liquidity_horizon_days", strategy.get("rebalance_horizon_days", 7))
@@ -240,7 +263,10 @@ def calculate_rebalance_economics(
 def project_stats_with_transfer(stats: dict[str, Any], amount: Any) -> dict[str, Any]:
     projected = dict(stats)
     requested = asset_amount(amount)
-    amounts = [asset_amount(value) for value in stats.get("amounts", [])]
+    amounts = [
+        asset_amount(value)
+        for value in stats.get("recurring_amounts", stats.get("amounts", []))
+    ]
     amounts.append(requested)
     transfer_sum = sum(amounts, Decimal("0"))
     projected.update(
@@ -248,10 +274,15 @@ def project_stats_with_transfer(stats: dict[str, Any], amount: Any) -> dict[str,
             "transfer_count": len(amounts),
             "transfer_sum": fmt(transfer_sum),
             "p95_transfer_amount": fmt(percentile95(amounts)),
+            "recurring_transfer_sum": fmt(transfer_sum),
+            "recurring_p90_transfer_amount": fmt(
+                percentile_linear(amounts, Decimal("0.9"))
+            ),
             "weekly_transfer_count": len(amounts),
             "weekly_transfer_sum": fmt(transfer_sum),
             "weekly_max_single_amount": fmt(max(amounts) if amounts else Decimal("0")),
             "amounts": [fmt(value) for value in amounts],
+            "recurring_amounts": [fmt(value) for value in amounts],
         }
     )
     return projected
@@ -263,6 +294,21 @@ def percentile95(values: list[Decimal]) -> Decimal:
     ordered = sorted(values)
     index = max(0, (len(ordered) * 95 + 99) // 100 - 1)
     return ordered[min(index, len(ordered) - 1)]
+
+
+def percentile_linear(values: list[Decimal], percentile: Decimal) -> Decimal:
+    if not values:
+        return Decimal("0")
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = max(Decimal("0"), min(Decimal("1"), percentile)) * Decimal(
+        len(ordered) - 1
+    )
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - Decimal(lower)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
 
 
 def asset_amount(value: Any) -> Decimal:
