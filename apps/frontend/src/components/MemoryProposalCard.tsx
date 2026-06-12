@@ -18,7 +18,8 @@ const CANDIDATE_LABELS: Record<string, string> = {
   user_floor: "用户最低保留",
   min_liquidity_ratio: "最低安全比例",
   flow_horizon: "历史流出需求",
-  p95_transfer: "P95 单笔需求",
+  recurring_single_buffer: "经常性 P90 单笔缓冲",
+  planned_outflow: "计划支出",
   economic_batch: "Gas 经济批量",
 };
 
@@ -76,6 +77,18 @@ export function MemoryProposalCard({
             <p key={key}>
               <b>{CANDIDATE_LABELS[key] ?? key}</b>
               <span>{impact.before.candidates[key]} → {impact.after.candidates[key]} {impact.asset}</span>
+            </p>
+          ))}
+        </div>
+      )}
+
+      {impact.strategy_history && impact.strategy_history.excluded_transfer_count > 0 && (
+        <div className="candidate-impact-list">
+          <span>未参与策略计算的历史大额</span>
+          {impact.strategy_history.excluded_transfers.map((item) => (
+            <p key={item.event_id}>
+              <b>{item.amount} {impact.asset}</b>
+              <span>{item.source === "user" ? "人工标记" : "稳健异常检测"} · 原始审计保留</span>
             </p>
           ))}
         </div>

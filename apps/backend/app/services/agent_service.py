@@ -19,6 +19,7 @@ from app.services.memory_service import (
     load_profile,
     store_profile_proposal,
 )
+from app.services.treasury_planner_service import plan_treasury_message
 from app.services.treasury_service import (
     approve_local_pact,
     create_external_transfer_pact,
@@ -41,17 +42,61 @@ REBALANCE_KEYWORDS = ("rebalance", "再平衡", "调仓", "每日计算", "每�
 INITIALIZE_KEYWORDS = ("初始化", "存入", "deposit")
 APPROVE_KEYWORDS = ("approve pact", "批准 pact", "审批 pact", "通过 pact")
 AAVE_KEYWORDS = ("aave", "Aave", "生息", "supply", "withdraw")
+RECEIVE_KEYWORDS = ("收款", "收款地址", "receive", "deposit address")
 
 
-async def handle_user_message(message: str) -> dict[str, Any]:
+async def handle_user_message(
+    message: str,
+    planning_session_id: str | None = None,
+) -> dict[str, Any]:
     profile = load_profile()
     normalized = message.lower()
     inferred_action = _infer_action(message, normalized)
-    memory_draft = build_profile_proposal(message)
+    planner_result = (
+        None
+        if not _should_use_treasury_planner(
+            message=message,
+            normalized=normalized,
+            inferred_action=inferred_action,
+            planning_session_id=planning_session_id,
+        )
+        else await plan_treasury_message(
+            message=message,
+            planning_session_id=planning_session_id,
+        )
+    )
+    if planner_result and planner_result.get("handled") and not planner_result.get(
+        "memory_draft"
+    ):
+        return {
+            "reply": planner_result.get("reply") or "I prepared a treasury plan.",
+            "llm_used": bool(planner_result.get("llm_used")),
+            "caw_used": False,
+            "memory_updated": False,
+            "memory_proposal": None,
+            "proposal": None,
+            "wallet": None,
+            "audit_logs": [],
+            "profile": profile,
+            "planning_session_id": planner_result.get("planning_session_id"),
+            "clarification": planner_result.get("clarification"),
+            "treasury_plan": planner_result.get("treasury_plan"),
+            "transfer_classification_proposal": planner_result.get(
+                "transfer_classification_proposal"
+            ),
+        }
+    memory_draft = (
+        planner_result.get("memory_draft")
+        if planner_result
+        else build_profile_proposal(message)
+    )
     if memory_draft is not None:
         inferred_action = "memory_update"
     llm_result = (
-        {"reply": "Using local deterministic routing for wallet safety flow.", "llm_used": False}
+        {
+            "reply": "Using local deterministic routing for wallet safety flow.",
+            "llm_used": bool(planner_result and planner_result.get("llm_used")),
+        }
         if inferred_action != "none"
         else await _safe_llm_route(message, profile)
     )
@@ -204,6 +249,12 @@ async def handle_user_message(message: str) -> dict[str, Any]:
         "wallet": wallet,
         "audit_logs": audit_logs,
         "profile": profile,
+        "planning_session_id": (
+            planner_result.get("planning_session_id") if planner_result else None
+        ),
+        "clarification": None,
+        "treasury_plan": None,
+        "transfer_classification_proposal": None,
     }
 
 
@@ -222,13 +273,19 @@ async def _final_agent_reply(
     transfer_result = tool_results.get("treasury_transfer")
     if isinstance(transfer_result, dict):
         return _transfer_result_summary(transfer_result), False
+    if tool_results.get("action") == "wallet_status" and wallet is not None:
+        return _wallet_status_summary(wallet), False
     if memory_proposal is not None:
         impact = memory_proposal.get("liquidity_impact", {})
         before = impact.get("before", {}).get("recommended_liquidity", "unknown")
         after = impact.get("after", {}).get("recommended_liquidity", "unknown")
+        excluded = impact.get("strategy_history", {}).get(
+            "excluded_transfer_count", 0
+        )
         return (
             f"我整理了一份用户画像变更提案。确认后，建议保留流动性预计从 "
-            f"{before} WBTC 调整为 {after} WBTC；CAW Pact 权限不会改变。",
+            f"{before} WBTC 调整为 {after} WBTC。历史模型已排除 {excluded} 笔"
+            "一次性大额；CAW Pact 权限不会改变。",
             False,
         )
 
@@ -270,6 +327,8 @@ async def _safe_llm_route(message: str, profile: dict[str, Any]) -> dict[str, An
 
 
 def _infer_action(message: str, normalized: str) -> str:
+    if _contains_keyword(message, normalized, RECEIVE_KEYWORDS):
+        return "wallet_status"
     if ("钱包" in message and any(keyword in message for keyword in ("钱", "余额", "资产", "多少"))) or (
         "wallet" in normalized and any(keyword in normalized for keyword in ("balance", "money", "asset"))
     ):
@@ -303,6 +362,58 @@ def _infer_action(message: str, normalized: str) -> str:
     if _contains_keyword(message, normalized, CAW_KEYWORDS):
         return "wallet_status"
     return "none"
+
+
+def _should_use_treasury_planner(
+    *,
+    message: str,
+    normalized: str,
+    inferred_action: str,
+    planning_session_id: str | None,
+) -> bool:
+    wallet_actions = {
+        "wallet_status",
+        "audit_logs",
+        "treasury_transfer",
+        "treasury_status",
+        "treasury_rebalance",
+        "treasury_initialize",
+        "approve_local_pact",
+        "execute_transfer",
+        "aave_status",
+        "aave_submit_pact",
+        "aave_supply",
+        "aave_withdraw",
+    }
+    if inferred_action in wallet_actions:
+        return False
+    if planning_session_id:
+        return True
+    planner_language = (
+        "一次性",
+        "经常性",
+        "one-off",
+        "recurring",
+        "提高收益",
+        "收益优先",
+        "下周",
+        "未来",
+        "计划支出",
+        "next week",
+        "liquidity",
+        "流动性",
+        "至少保留",
+        "最低保留",
+        "覆盖",
+        "保守",
+        "平衡",
+        "激进",
+        "低 gas",
+        "low gas",
+    )
+    return inferred_action == "none" or any(
+        keyword in normalized or keyword in message for keyword in planner_language
+    )
 
 
 def _contains_keyword(message: str, normalized: str, keywords: tuple[str, ...]) -> bool:

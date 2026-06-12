@@ -40,6 +40,10 @@ from app.services.treasury_policy import (
     plan_transfer,
     project_stats_with_transfer,
 )
+from app.services.treasury_memory_service import (
+    classify_transfer_events,
+    planned_outflow_sum,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
@@ -74,7 +78,7 @@ DEFAULT_STRATEGY: dict[str, Any] = {
     "min_liquidity_ratio": "0.10",
     "liquidity_horizon_days": 7,
     "risk_multiplier": "1.20",
-    "single_tx_multiplier": "1.50",
+    "recurring_single_multiplier": "1.50",
     "gas_safety_multiplier": "1.20",
     "min_rebalance_amount": "0.001",
     "aave_apy": "0.02",
@@ -98,7 +102,7 @@ DEFAULT_STATE: dict[str, Any] = {
 
 async def initialize_wallet(deposit_amount: str | None = None) -> dict[str, Any]:
     state = _load_state()
-    state["strategy"] = {**DEFAULT_STRATEGY, **state.get("strategy", {})}
+    state["strategy"] = _migrate_strategy(state.get("strategy", {}))
     state["updated_at"] = _now_iso()
     _save_state(state)
     _append_event({"type": "wallet_initialized", "mode": "caw_aave_sepolia_real", "asset": ASSET})
@@ -119,6 +123,12 @@ def _compose_treasury_state(
     balances = _extract_real_balances(aave_state, wallet_status)
     stats = get_transfer_stats()
     liquidity = _calculate_liquidity(state, stats, balances)
+    classification_attention = _build_classification_attention(
+        state=state,
+        balances=balances,
+        stats=stats,
+        current_liquidity=liquidity,
+    )
     recommendation = _legacy_recommendation(liquidity)
     return {
         "mode": "caw_aave_sepolia_real",
@@ -132,6 +142,7 @@ def _compose_treasury_state(
         "effective_strategy": liquidity["effective_strategy"],
         "profile_impacts": liquidity["profile_impacts"],
         "candidate_sources": liquidity["candidate_sources"],
+        "classification_attention": classification_attention,
         "transfer_stats_7d": stats,
         "recommendation": recommendation,
         "rebalance_preview": state.get("last_rebalance_preview"),
@@ -141,6 +152,128 @@ def _compose_treasury_state(
         "wallet_status": wallet_status,
         "last_rebalance_at": state.get("last_rebalance_at"),
         "updated_at": state.get("updated_at"),
+    }
+
+
+def _build_classification_attention(
+    *,
+    state: dict[str, Any],
+    balances: dict[str, str],
+    stats: dict[str, Any],
+    current_liquidity: dict[str, Any],
+) -> dict[str, Any] | None:
+    automatic_one_offs = [
+        item
+        for item in stats.get("transfer_classifications", [])
+        if item.get("classification") == "one_off"
+        and item.get("source") == "automatic"
+    ]
+    if not automatic_one_offs:
+        return None
+
+    current_effect = _classification_strategy_effect(
+        state=state,
+        balances=balances,
+        liquidity=current_liquidity,
+    )
+    for event in sorted(
+        automatic_one_offs,
+        key=lambda item: asset_amount(item.get("amount", "0")),
+        reverse=True,
+    ):
+        alternate_stats = get_transfer_stats(
+            classification_overrides={
+                str(event["event_id"]): {
+                    "classification": "recurring",
+                    "reason": "Impact simulation only.",
+                }
+            }
+        )
+        alternate_liquidity = _calculate_liquidity(
+            state,
+            alternate_stats,
+            balances,
+        )
+        alternate_effect = _classification_strategy_effect(
+            state=state,
+            balances=balances,
+            liquidity=alternate_liquidity,
+        )
+        liquidity_delta = abs(
+            asset_amount(alternate_liquidity["target"])
+            - asset_amount(current_liquidity["target"])
+        )
+        action_changed = current_effect["action"] != alternate_effect["action"]
+        pact_gap_changed = (
+            current_effect["requires_new_pact"]
+            != alternate_effect["requires_new_pact"]
+        )
+        needs_attention = (
+            liquidity_delta >= Decimal("0.01")
+            or action_changed
+            or pact_gap_changed
+        )
+        if needs_attention:
+            return {
+                "event": event,
+                "automatic_classification": "one_off",
+                "alternative_classification": "recurring",
+                "needs_attention": True,
+                "threshold": "0.01",
+                "impact": {
+                    "liquidity_delta": fmt(liquidity_delta),
+                    "action_changed": action_changed,
+                    "pact_gap_changed": pact_gap_changed,
+                    "one_off": {
+                        "recommended_liquidity": current_liquidity["target"],
+                        "target_yield_balance": current_liquidity[
+                            "target_yield_balance"
+                        ],
+                        **current_effect,
+                    },
+                    "recurring": {
+                        "recommended_liquidity": alternate_liquidity["target"],
+                        "target_yield_balance": alternate_liquidity[
+                            "target_yield_balance"
+                        ],
+                        **alternate_effect,
+                    },
+                },
+            }
+    return None
+
+
+def _classification_strategy_effect(
+    *,
+    state: dict[str, Any],
+    balances: dict[str, str],
+    liquidity: dict[str, Any],
+) -> dict[str, Any]:
+    current_aave = asset_amount(balances.get("aave_withdrawable", "0"))
+    target_aave = asset_amount(liquidity["target_yield_balance"])
+    delta = target_aave - current_aave
+    if delta > 0:
+        action = "supply_to_aave"
+        amount = delta
+    elif delta < 0:
+        action = "withdraw_from_aave"
+        amount = -delta
+    else:
+        action = "hold"
+        amount = Decimal("0")
+    active_limit = max(
+        (
+            asset_amount(pact.get("scope", {}).get("max_amount", "0"))
+            for pact in state.get("pacts", [])
+            if pact.get("pact_type") == "internal_agent_rebalance"
+            and pact.get("status") == "active"
+        ),
+        default=Decimal("0"),
+    )
+    return {
+        "action": action,
+        "amount": fmt(amount),
+        "requires_new_pact": amount > active_limit,
     }
 
 
@@ -757,6 +890,7 @@ def get_transfer_stats(
     now: datetime | None = None,
     destination: str | None = None,
     history_days: int | None = None,
+    classification_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     events = _read_events()
     days = history_days or int(_load_state()["strategy"].get("transfer_history_days", 30))
@@ -770,6 +904,9 @@ def get_transfer_stats(
     if destination:
         transfers = [event for event in transfers if _same_address(event.get("destination"), destination)]
     amounts = [asset_amount(event.get("amount", "0")) for event in transfers]
+    classified = classify_transfer_events(transfers, classification_overrides)
+    recurring_amounts = classified.pop("recurring_amounts")
+    one_off_amounts = classified.pop("one_off_amounts")
     total = sum(amounts, Decimal("0"))
     count = len(amounts)
     maximum = max(amounts) if amounts else Decimal("0")
@@ -779,11 +916,15 @@ def get_transfer_stats(
         "transfer_count": count,
         "transfer_sum": fmt(total),
         "p95_transfer_amount": fmt(percentile95(amounts)),
-        "amounts": [fmt(value) for value in amounts],
+        "amounts": [fmt(value) for value in recurring_amounts],
+        "raw_amounts": [fmt(value) for value in amounts],
+        "recurring_amounts": [fmt(value) for value in recurring_amounts],
+        "one_off_amounts": [fmt(value) for value in one_off_amounts],
         "weekly_transfer_count": count,
         "weekly_transfer_sum": fmt(total),
         "weekly_max_single_amount": fmt(maximum),
         "weekly_avg_transfer_amount": fmt(average),
+        **classified,
     }
 
 
@@ -796,6 +937,7 @@ def _calculate_liquidity(
     profile: dict[str, Any] | None = None,
     effective_strategy: dict[str, Any] | None = None,
     profile_impacts: list[dict[str, Any]] | None = None,
+    additional_planned_outflows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     profile = profile or load_profile()
     effective_strategy, profile_impacts = (
@@ -804,9 +946,16 @@ def _calculate_liquidity(
         else build_effective_strategy(state["strategy"], profile)
     )
     user_floor = profile.get("user_preferences", {}).get("liquidity_floor") or "0"
+    calculation_stats = {
+        **stats,
+        "planned_outflow_sum": planned_outflow_sum(
+            horizon_days=int(effective_strategy.get("liquidity_horizon_days", 7)),
+            additional=additional_planned_outflows,
+        ),
+    }
     result = calculate_liquidity_target(
         total_balance=balances["total"],
-        stats=stats,
+        stats=calculation_stats,
         strategy=effective_strategy,
         user_floor=user_floor,
         estimated_withdraw_gas_asset=estimated_withdraw_gas_asset,
@@ -831,17 +980,107 @@ async def preview_profile_liquidity(profile: dict[str, Any]) -> dict[str, Any]:
         "asset": ASSET,
         "before": _compact_liquidity_impact(current),
         "after": _compact_liquidity_impact(proposed),
+        "strategy_history": {
+            "recurring_transfer_sum": stats.get("recurring_transfer_sum", "0"),
+            "recurring_p90_transfer_amount": stats.get(
+                "recurring_p90_transfer_amount", "0"
+            ),
+            "excluded_transfer_count": stats.get("excluded_transfer_count", 0),
+            "excluded_transfers": [
+                item
+                for item in stats.get("transfer_classifications", [])
+                if item.get("classification") == "one_off"
+            ],
+        },
         "changed": current["target"] != proposed["target"]
         or current["target_yield_balance"] != proposed["target_yield_balance"],
     }
 
 
+async def preview_treasury_scenarios(
+    scenarios: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    state = await refresh_pact_statuses(_load_state())
+    aave_state, wallet_status = await asyncio.gather(
+        get_aave_wallet_state(),
+        get_wallet_status(),
+    )
+    balances = _extract_real_balances(aave_state, wallet_status)
+    stats = get_transfer_stats()
+    current = _calculate_liquidity(state, stats, balances)
+    active_pact_limit = max(
+        (
+            asset_amount(pact.get("scope", {}).get("max_amount", "0"))
+            for pact in state.get("pacts", [])
+            if pact.get("pact_type") == "internal_agent_rebalance"
+            and pact.get("status") == "active"
+        ),
+        default=Decimal("0"),
+    )
+    current_aave = asset_amount(balances.get("aave_withdrawable", "0"))
+    results: list[dict[str, Any]] = []
+    for scenario in scenarios:
+        proposed = _calculate_liquidity(
+            state,
+            stats,
+            balances,
+            profile=scenario["profile"],
+            additional_planned_outflows=scenario.get("planned_outflows", []),
+        )
+        target_aave = asset_amount(proposed["target_yield_balance"])
+        delta = target_aave - current_aave
+        if delta > 0:
+            action = "supply_to_aave"
+            amount = delta
+        elif delta < 0:
+            action = "withdraw_from_aave"
+            amount = -delta
+        else:
+            action = "hold"
+            amount = Decimal("0")
+        pact_gap = max(Decimal("0"), amount - active_pact_limit)
+        results.append(
+            {
+                "scenario_id": scenario["scenario_id"],
+                "label": scenario["label"],
+                "profile_patch": scenario["profile_patch"],
+                "planned_outflows": scenario.get("planned_outflows", []),
+                "before": _compact_liquidity_impact(current),
+                "after": _compact_liquidity_impact(proposed),
+                "recurring_statistics": {
+                    "recurring_transfer_sum": stats.get("recurring_transfer_sum", "0"),
+                    "recurring_p90_transfer_amount": stats.get(
+                        "recurring_p90_transfer_amount", "0"
+                    ),
+                    "excluded_transfer_count": stats.get(
+                        "excluded_transfer_count", 0
+                    ),
+                },
+                "expected_action": {
+                    "action": action,
+                    "amount": fmt(amount),
+                },
+                "pact_gap": {
+                    "active_internal_limit": fmt(active_pact_limit),
+                    "additional_limit_required": fmt(pact_gap),
+                    "requires_new_pact": pact_gap > 0,
+                },
+            }
+        )
+    return results
+
+
 def _compact_liquidity_impact(liquidity: dict[str, Any]) -> dict[str, Any]:
+    dominant_key = max(
+        liquidity["components"],
+        key=lambda key: asset_amount(liquidity["components"][key]),
+    )
     return {
         "recommended_liquidity": liquidity["target"],
         "target_yield_balance": liquidity["target_yield_balance"],
         "candidates": liquidity["components"],
         "effective_strategy": liquidity["effective_strategy"],
+        "dominant_candidate": dominant_key,
     }
 
 
@@ -854,7 +1093,10 @@ def _candidate_sources(profile: dict[str, Any]) -> dict[str, str]:
         "user_floor": "PROFILE" if user_floor is not None else "SYSTEM",
         "min_liquidity_ratio": "PROFILE" if risk_level != "balanced" else "SYSTEM",
         "flow_horizon": "PROFILE + HISTORY" if risk_level != "balanced" or horizon else "HISTORY",
-        "p95_transfer": "PROFILE + HISTORY" if risk_level != "balanced" else "HISTORY",
+        "recurring_single_buffer": (
+            "PROFILE + HISTORY" if risk_level != "balanced" else "HISTORY"
+        ),
+        "planned_outflow": "PROFILE",
         "economic_batch": "SYSTEM",
     }
 
@@ -1032,13 +1274,23 @@ def _merge_state_defaults(state: dict[str, Any]) -> dict[str, Any]:
     merged.update(state)
     merged["asset"] = ASSET
     merged["chain_id"] = CHAIN_ID
-    merged["strategy"] = {**DEFAULT_STRATEGY, **state.get("strategy", {})}
+    merged["strategy"] = _migrate_strategy(state.get("strategy", {}))
     merged["pacts"] = [
         _normalize_pact(pact)
         for pact in state.get("pacts", [])
         if _should_keep_pact(pact)
     ]
     return merged
+
+
+def _migrate_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
+    migrated = {**DEFAULT_STRATEGY, **strategy}
+    if (
+        "recurring_single_multiplier" not in strategy
+        and strategy.get("single_tx_multiplier") is not None
+    ):
+        migrated["recurring_single_multiplier"] = strategy["single_tx_multiplier"]
+    return migrated
 
 
 def _normalize_pact(pact: dict[str, Any]) -> dict[str, Any]:
@@ -1071,7 +1323,11 @@ def _should_keep_pact(pact: dict[str, Any]) -> bool:
 
 def _append_event(event: dict[str, Any]) -> None:
     TREASURY_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {"created_at": _now_iso(), **event}
+    payload = {
+        "event_id": str(event.get("event_id") or f"event-{uuid.uuid4().hex[:16]}"),
+        "created_at": _now_iso(),
+        **event,
+    }
     with TREASURY_EVENTS_PATH.open("a", encoding="utf-8") as events_file:
         events_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 

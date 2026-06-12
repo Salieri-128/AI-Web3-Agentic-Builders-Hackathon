@@ -12,12 +12,15 @@ from app.schemas import (
     CawActionResponse,
     ChatRequest,
     ChatResponse,
+    DirectTransferClassificationRequest,
     MemoryProposalRequest,
     PactApprovalRequest,
     PactProposalRequest,
     StatusResponse,
+    TransferClassificationRequest,
     TransferRequest,
     TreasuryInitializeRequest,
+    TreasuryPlanSelectionRequest,
     TreasuryTransferRequest,
 )
 from app.services.aave_service import (
@@ -47,6 +50,12 @@ from app.services.treasury_service import (
     sync_treasury,
     sync_workspace,
 )
+from app.services.treasury_planner_service import (
+    confirm_transfer_classification,
+    reject_transfer_classification,
+    select_treasury_plan,
+)
+from app.services.treasury_memory_service import set_transfer_classification
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -123,8 +132,101 @@ async def reject_memory_proposal(request: MemoryProposalRequest) -> CawActionRes
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    result = await handle_user_message(request.message)
+    result = await handle_user_message(
+        request.message,
+        planning_session_id=request.planning_session_id,
+    )
     return ChatResponse(**result)
+
+
+@app.post("/api/treasury/plans/select", response_model=CawActionResponse)
+async def treasury_plan_select(
+    request: TreasuryPlanSelectionRequest,
+) -> CawActionResponse:
+    try:
+        plan = select_treasury_plan(request.plan_id, request.scenario_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    workspace = await sync_workspace()
+    return CawActionResponse(
+        status="applied",
+        message="Treasury scenario applied and recommendation recalculated",
+        data={
+            "plan": plan,
+            "profile": workspace["profile"],
+            "treasury": workspace["treasury"],
+        },
+    )
+
+
+@app.post(
+    "/api/transfers/classifications/confirm",
+    response_model=CawActionResponse,
+)
+async def transfer_classification_confirm(
+    request: TransferClassificationRequest,
+) -> CawActionResponse:
+    try:
+        proposal = confirm_transfer_classification(request.proposal_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    workspace = await sync_workspace()
+    return CawActionResponse(
+        status="applied",
+        message="Transfer classification applied to liquidity strategy",
+        data={
+            "proposal": proposal,
+            "profile": workspace["profile"],
+            "treasury": workspace["treasury"],
+        },
+    )
+
+
+@app.post(
+    "/api/transfers/classifications/reject",
+    response_model=CawActionResponse,
+)
+async def transfer_classification_reject(
+    request: TransferClassificationRequest,
+) -> CawActionResponse:
+    try:
+        proposal = reject_transfer_classification(request.proposal_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return CawActionResponse(
+        status="rejected",
+        message="Transfer classification proposal rejected",
+        data={"proposal": proposal},
+    )
+
+
+@app.post(
+    "/api/transfers/classifications",
+    response_model=CawActionResponse,
+)
+async def transfer_classification_apply(
+    request: DirectTransferClassificationRequest,
+) -> CawActionResponse:
+    if request.classification not in {"one_off", "recurring"}:
+        raise HTTPException(
+            status_code=422,
+            detail="classification must be one_off or recurring",
+        )
+    classification = set_transfer_classification(
+        event_id=request.event_id,
+        classification=request.classification,
+        reason="Confirmed from wallet attention prompt.",
+    )
+    workspace = await sync_workspace()
+    return CawActionResponse(
+        status="applied",
+        message="Transfer classification applied to liquidity strategy",
+        data={
+            "classification": classification,
+            "profile": workspace["profile"],
+            "treasury": workspace["treasury"],
+        },
+    )
 
 
 @app.get("/api/caw/wallet", response_model=CawActionResponse)

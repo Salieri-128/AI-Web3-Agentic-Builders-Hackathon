@@ -32,14 +32,118 @@ export type MemoryProposal = {
     changed: boolean;
     before: LiquidityImpact;
     after: LiquidityImpact;
+    strategy_history?: {
+      recurring_transfer_sum: string;
+      recurring_p90_transfer_amount: string;
+      excluded_transfer_count: number;
+      excluded_transfers: TransferClassification[];
+    };
   };
 };
 
-type LiquidityImpact = {
+export type LiquidityImpact = {
   recommended_liquidity: string;
   target_yield_balance: string;
   candidates: Record<string, string>;
   effective_strategy: Record<string, string | number>;
+  dominant_candidate?: string;
+};
+
+export type Clarification = {
+  planning_session_id: string;
+  question: string;
+  missing_information: string[];
+  confidence: number;
+  candidates?: TransferClassification[];
+};
+
+export type TreasuryScenario = {
+  scenario_id: string;
+  label: string;
+  profile_patch: Record<string, string | number | boolean | null>;
+  planned_outflows: PlannedOutflow[];
+  before: LiquidityImpact;
+  after: LiquidityImpact;
+  recurring_statistics: {
+    recurring_transfer_sum: string;
+    recurring_p90_transfer_amount: string;
+    excluded_transfer_count: number;
+  };
+  expected_action: {
+    action: "supply_to_aave" | "withdraw_from_aave" | "hold";
+    amount: string;
+  };
+  pact_gap: {
+    active_internal_limit: string;
+    additional_limit_required: string;
+    requires_new_pact: boolean;
+  };
+};
+
+export type PlannedOutflow = {
+  amount: string;
+  due_at: string;
+  description?: string;
+};
+
+export type TreasuryPlan = {
+  plan_id: string;
+  planning_session_id: string;
+  status: string;
+  message: string;
+  explanation: string;
+  scenarios: TreasuryScenario[];
+  safety_boundary: string;
+};
+
+export type TransferClassification = {
+  event_id: string;
+  amount: string;
+  created_at?: string;
+  destination?: string;
+  classification: "one_off" | "recurring";
+  source: "automatic" | "user";
+  reason: string;
+};
+
+export type TransferClassificationProposal = {
+  proposal_id: string;
+  status: string;
+  classification: "one_off" | "recurring";
+  event: TransferClassification;
+  statistics_before: StrategyTransferStats;
+  statistics_after: StrategyTransferStats;
+  safety_boundary: string;
+};
+
+type StrategyTransferStats = {
+  recurring_transfer_sum: string;
+  recurring_p90_transfer_amount: string;
+  one_off_transfer_sum: string;
+  excluded_transfer_count: number;
+};
+
+export type ClassificationEffect = {
+  recommended_liquidity: string;
+  target_yield_balance: string;
+  action: "supply_to_aave" | "withdraw_from_aave" | "hold";
+  amount: string;
+  requires_new_pact: boolean;
+};
+
+export type ClassificationAttention = {
+  event: TransferClassification;
+  automatic_classification: "one_off";
+  alternative_classification: "recurring";
+  needs_attention: boolean;
+  threshold: string;
+  impact: {
+    liquidity_delta: string;
+    action_changed: boolean;
+    pact_gap_changed: boolean;
+    one_off: ClassificationEffect;
+    recurring: ClassificationEffect;
+  };
 };
 
 export type Proposal = {
@@ -77,6 +181,10 @@ export type ChatResponse = {
   wallet: WalletStatus | null;
   audit_logs: AuditLog[];
   profile: Profile | null;
+  planning_session_id?: string | null;
+  clarification?: Clarification | null;
+  treasury_plan?: TreasuryPlan | null;
+  transfer_classification_proposal?: TransferClassificationProposal | null;
 };
 
 export type WalletStatus = {
@@ -121,11 +229,21 @@ export type TreasuryState = {
     after: string | number;
   }>;
   candidate_sources?: Record<string, string>;
+  classification_attention?: ClassificationAttention | null;
   transfer_stats_7d: {
+    transfer_count: number;
+    transfer_sum: string;
+    p95_transfer_amount: string;
     weekly_transfer_count: number;
     weekly_transfer_sum: string;
     weekly_max_single_amount: string;
     weekly_avg_transfer_amount: string;
+    recurring_transfer_sum: string;
+    recurring_p90_transfer_amount: string;
+    one_off_transfer_sum: string;
+    excluded_transfer_count: number;
+    automatic_outlier_threshold?: string | null;
+    transfer_classifications: TransferClassification[];
   };
   recommendation: {
     recommended_liquidity: string;
@@ -247,18 +365,102 @@ async function updateMemoryProposal(action: "confirm" | "reject", proposalId: st
   return payload.data;
 }
 
-export async function sendChat(message: string): Promise<ChatResponse> {
+export async function sendChat(
+  message: string,
+  planningSessionId?: string | null,
+): Promise<ChatResponse> {
   const response = await fetch(`${backendUrl}/api/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({
+      message,
+      planning_session_id: planningSessionId || undefined,
+    }),
   });
   if (!response.ok) {
     throw new Error("Failed to send message to backend agent");
   }
   return response.json();
+}
+
+export async function selectTreasuryPlan(
+  planId: string,
+  scenarioId: string,
+): Promise<{
+  plan: TreasuryPlan;
+  profile: Profile;
+  treasury: TreasuryState;
+}> {
+  const response = await fetch(`${backendUrl}/api/treasury/plans/select`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan_id: planId, scenario_id: scenarioId }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to apply treasury scenario");
+  }
+  const payload = await response.json();
+  return payload.data;
+}
+
+export async function confirmTransferClassification(
+  proposalId: string,
+): Promise<{
+  proposal: TransferClassificationProposal;
+  profile: Profile;
+  treasury: TreasuryState;
+}> {
+  return updateTransferClassification("confirm", proposalId);
+}
+
+export async function rejectTransferClassification(
+  proposalId: string,
+): Promise<{ proposal: TransferClassificationProposal }> {
+  return updateTransferClassification("reject", proposalId);
+}
+
+export async function applyTransferClassification(
+  eventId: string,
+  classification: "one_off" | "recurring",
+): Promise<{
+  classification: Record<string, unknown>;
+  profile: Profile;
+  treasury: TreasuryState;
+}> {
+  const response = await fetch(`${backendUrl}/api/transfers/classifications`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      event_id: eventId,
+      classification,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to apply transfer classification");
+  }
+  const payload = await response.json();
+  return payload.data;
+}
+
+async function updateTransferClassification(
+  action: "confirm" | "reject",
+  proposalId: string,
+) {
+  const response = await fetch(
+    `${backendUrl}/api/transfers/classifications/${action}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ proposal_id: proposalId }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to ${action} transfer classification`);
+  }
+  const payload = await response.json();
+  return payload.data;
 }
 
 export async function fetchWalletStatus(): Promise<WalletStatus> {
