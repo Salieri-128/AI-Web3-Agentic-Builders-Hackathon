@@ -108,7 +108,7 @@ Aave Rebalance Pact 只允许：
 待补充：
 
 - 3–5 分钟演示视频链接；
-- 提交页面中的完整交易哈希列表。
+- 完整交易哈希与操作类型映射。
 
 ## 测试网证据
 
@@ -121,6 +121,13 @@ CAW Agent Wallet：
 - [Sepolia WBTC](https://sepolia.etherscan.io/address/0x29f2d40b0605204364af54ec677bd022da425d03)
 - [Sepolia aWBTC](https://sepolia.etherscan.io/address/0x1804bf30507dc2eb3bdebbbdd859991eaef6eeff)
 - [Aave V3 Pool](https://sepolia.etherscan.io/address/0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951)
+
+部分 Sepolia 交易记录：
+
+- [Transaction 1: `0x50c9...716b`](https://sepolia.etherscan.io/tx/0x50c9aee2513c532a166960d68c19cea8e95aa2a66f5dc60a8dbbf8ed875a716b)
+- [Transaction 2: `0x1f09...1163`](https://sepolia.etherscan.io/tx/0x1f09d3997b57d229a5d0441bcc50f59ecacbd5d2c46f9bec41ec0dddc16c1163)
+- [Transaction 3: `0xe36b...5d70`](https://sepolia.etherscan.io/tx/0xe36b303ef8540d3ee6b407c461cbef4ada90054bcf016bb09a41e3e41b1f5d70)
+- [Transaction 4: `0x5e57...d107`](https://sepolia.etherscan.io/tx/0x5e579d5a475fc8ce7e9cdd6119e5d1ec8db7312fab48e079a2657581f5a1d107)
 
 ### Pact 概览
 

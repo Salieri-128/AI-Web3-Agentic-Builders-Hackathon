@@ -176,7 +176,16 @@ npm run build
 | aWBTC | [`0x1804bf30507dc2eb3bdebbbdd859991eaef6eeff`](https://sepolia.etherscan.io/address/0x1804bf30507dc2eb3bdebbbdd859991eaef6eeff) |
 | Aave V3 Pool | [`0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951`](https://sepolia.etherscan.io/address/0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951) |
 
-交易哈希：待补充。以下截图记录了 CAW Pact、权限限制和 Sepolia 合约调用结果。
+### 部分交易哈希
+
+| 记录 | Sepolia 交易 |
+| --- | --- |
+| Transaction 1 | [`0x50c9...716b`](https://sepolia.etherscan.io/tx/0x50c9aee2513c532a166960d68c19cea8e95aa2a66f5dc60a8dbbf8ed875a716b) |
+| Transaction 2 | [`0x1f09...1163`](https://sepolia.etherscan.io/tx/0x1f09d3997b57d229a5d0441bcc50f59ecacbd5d2c46f9bec41ec0dddc16c1163) |
+| Transaction 3 | [`0xe36b...5d70`](https://sepolia.etherscan.io/tx/0xe36b303ef8540d3ee6b407c461cbef4ada90054bcf016bb09a41e3e41b1f5d70) |
+| Transaction 4 | [`0x5e57...d107`](https://sepolia.etherscan.io/tx/0x5e579d5a475fc8ce7e9cdd6119e5d1ec8db7312fab48e079a2657581f5a1d107) |
+
+以下截图进一步记录了 CAW Pact、权限限制和 Sepolia 合约调用结果。
 
 | 证据 | 截图 |
 | --- | --- |
@@ -219,7 +228,8 @@ npm run build
 - [x] React 对话与资金控制台
 - [x] Sepolia 端到端 Demo 路径
 - [ ] 3–5 分钟演示视频
-- [ ] 在提交页面补充完整交易哈希
+- [x] 补充部分 Sepolia 交易哈希
+- [ ] 整理完整交易哈希与操作类型映射
 
 ## 后续计划
 
